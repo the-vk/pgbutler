@@ -1,12 +1,15 @@
-//! Database connectivity with mandatory mutual TLS.
+//! Database connectivity with configurable TLS, controlled by
+//! [`crate::config::SslMode`] (mirroring libpq's `sslmode` parameter).
 //!
-//! Every connection is established with `sslmode=verify-full` and requires
-//! a client certificate/key pair in addition to the server's root CA. There
-//! is no fallback to plaintext or server-only TLS.
+//! Certificate material is only required when the selected mode demands it:
+//! `verify-ca`/`verify-full` require a root CA to validate the server, and
+//! `verify-full` additionally checks the server hostname. A client
+//! certificate/key pair is always optional and, when configured, is
+//! presented for mutual TLS regardless of mode (as long as TLS is in use).
 
 use openssl::ssl::{SslFiletype, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
-use tokio_postgres::{Client, SimpleQueryMessage};
+use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 
 use crate::config::Connection;
 
@@ -30,33 +33,62 @@ pub enum DbError {
     Connect(#[from] tokio_postgres::Error),
 }
 
-/// Connect to PostgreSQL using verify-full TLS with mandatory client certificates.
+/// Connect to PostgreSQL, applying TLS according to `conn.sslmode`.
 ///
 /// Returns the live client; the background connection task is spawned onto
 /// the current tokio runtime and its errors are dropped after logging.
 pub async fn connect(conn: &Connection) -> Result<Client, DbError> {
     conn.validate().map_err(DbError::Config)?;
 
-    let mut builder = openssl::ssl::SslConnector::builder(SslMethod::tls())?;
-    builder.set_ca_file(&conn.sslrootcert)?;
-    builder.set_certificate_file(&conn.sslcert, SslFiletype::PEM)?;
-    builder.set_private_key_file(&conn.sslkey, SslFiletype::PEM)?;
-    builder.check_private_key()?;
-    // verify-full: validate the certificate chain AND the server hostname.
-    builder.set_verify(SslVerifyMode::PEER);
-
-    let connector = MakeTlsConnector::new(builder.build());
-
     let mut pg_config = tokio_postgres::Config::new();
     pg_config
         .host(&conn.host)
         .port(conn.port)
         .dbname(&conn.catalog)
-        .user(&conn.login)
-        .ssl_mode(tokio_postgres::config::SslMode::Require);
+        .user(&conn.login);
     if !conn.password.is_empty() {
         pg_config.password(&conn.password);
     }
+
+    if !conn.sslmode.uses_tls() {
+        pg_config.ssl_mode(tokio_postgres::config::SslMode::Disable);
+        let (client, connection) = pg_config.connect(NoTls).await?;
+        tokio::spawn(async move {
+            if let Err(err) = connection.await {
+                eprintln!("pgbutler: connection task ended: {err}");
+            }
+        });
+        return Ok(client);
+    }
+
+    pg_config.ssl_mode(tokio_postgres::config::SslMode::Require);
+
+    let mut builder = openssl::ssl::SslConnector::builder(SslMethod::tls())?;
+    if let Some(root) = conn.sslrootcert.as_deref() {
+        builder.set_ca_file(root)?;
+    }
+    if let (Some(cert), Some(key)) = (conn.sslcert.as_deref(), conn.sslkey.as_deref()) {
+        builder.set_certificate_file(cert, SslFiletype::PEM)?;
+        builder.set_private_key_file(key, SslFiletype::PEM)?;
+        builder.check_private_key()?;
+    }
+    // `require`/`prefer` skip verification entirely; `verify-ca`/`verify-full`
+    // validate the certificate chain against the root CA set above.
+    builder.set_verify(if conn.sslmode.verify_peer() {
+        SslVerifyMode::PEER
+    } else {
+        SslVerifyMode::NONE
+    });
+
+    let mut connector = MakeTlsConnector::new(builder.build());
+    // Hostname verification is only meaningful (and only enabled) for
+    // `verify-full`; it's applied per-connection since it lives on
+    // `ConnectConfiguration`, not on the `SslConnector` builder above.
+    let verify_hostname = conn.sslmode.verify_hostname();
+    connector.set_callback(move |ssl, _domain| {
+        ssl.set_verify_hostname(verify_hostname);
+        Ok(())
+    });
 
     let (client, connection) = pg_config.connect(connector).await?;
 

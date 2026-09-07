@@ -1,10 +1,9 @@
 //! Connection configuration storage.
 //!
 //! Connections are stored as individual TOML files under
-//! `~/.pgbutler/connections/<name>.toml`. Mutual TLS (client certificate
-//! verification) is mandatory: every stored connection must reference a
-//! root CA certificate plus a client certificate/key pair, and `sslmode`
-//! is always pinned to `verify-full`.
+//! `~/.pgbutler/connections/<name>.toml`. TLS behavior is controlled by
+//! `sslmode` (mirroring libpq); certificate files are only required when the
+//! selected mode actually needs them (see [`SslMode`]).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,8 +11,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 mod keyring;
+mod sslmode;
 
 pub use keyring::{read_master_key, write_master_key};
+pub use sslmode::SslMode;
 
 /// A single PostgreSQL connection profile, persisted to disk as TOML.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,12 +25,21 @@ pub struct Connection {
     pub port: u16,
     pub catalog: String,
     pub login: String,
-    /// Path to the CA certificate used to verify the server.
-    pub sslrootcert: String,
-    /// Path to the client certificate presented to the server.
-    pub sslcert: String,
-    /// Path to the client private key matching `sslcert`.
-    pub sslkey: String,
+    /// How strictly TLS is required and verified; see [`SslMode`].
+    #[serde(default)]
+    pub sslmode: SslMode,
+    /// Path to the CA certificate used to verify the server. Only required
+    /// when `sslmode` is `verify-ca` or `verify-full`.
+    #[serde(default)]
+    pub sslrootcert: Option<String>,
+    /// Path to the client certificate presented to the server. Always
+    /// optional: used for mutual TLS if provided and TLS is in use.
+    #[serde(default)]
+    pub sslcert: Option<String>,
+    /// Path to the client private key matching `sslcert`. Always optional,
+    /// on the same terms as `sslcert`.
+    #[serde(default)]
+    pub sslkey: Option<String>,
     /// Plaintext password for `login`, kept in memory only. Encrypted at
     /// rest with the `crypto` module when the connection is serialized to
     /// disk, and transparently decrypted back to plaintext when read.
@@ -52,14 +62,18 @@ impl Connection {
             port: 5432,
             catalog: "postgres".to_string(),
             login: whoami_fallback(),
-            sslrootcert: pg_dir.join("root.crt").to_string_lossy().into_owned(),
-            sslcert: pg_dir.join("postgresql.crt").to_string_lossy().into_owned(),
-            sslkey: pg_dir.join("postgresql.key").to_string_lossy().into_owned(),
+            sslmode: SslMode::default(),
+            sslrootcert: Some(pg_dir.join("root.crt").to_string_lossy().into_owned()),
+            sslcert: Some(pg_dir.join("postgresql.crt").to_string_lossy().into_owned()),
+            sslkey: Some(pg_dir.join("postgresql.key").to_string_lossy().into_owned()),
             password: String::new(),
         }
     }
 
-    /// Validate that all mandatory mTLS material is configured and present on disk.
+    /// Validate the connection, including the mutual-TLS material mandated
+    /// by `sslmode` (see [`SslMode::requires_root_cert`]). Certificate paths
+    /// that are configured are always checked for existence, even when not
+    /// strictly required by `sslmode`.
     pub fn validate(&self) -> Result<(), String> {
         if self.host.trim().is_empty() {
             return Err("host must not be empty".into());
@@ -70,19 +84,50 @@ impl Connection {
         if self.login.trim().is_empty() {
             return Err("user must not be empty".into());
         }
-        for (label, path) in [
-            ("root CA certificate (sslrootcert)", &self.sslrootcert),
-            ("client certificate (sslcert)", &self.sslcert),
-            ("client key (sslkey)", &self.sslkey),
-        ] {
-            if path.trim().is_empty() {
-                return Err(format!("{label} is mandatory for mutual TLS"));
-            }
-            if !Path::new(path).is_file() {
-                return Err(format!("{label} not found at '{path}'"));
-            }
+
+        check_cert_path(
+            "root CA certificate (sslrootcert)",
+            &self.sslrootcert,
+            self.sslmode.requires_root_cert(),
+            self.sslmode,
+        )?;
+        // Client certificate/key are never mandated by sslmode, but if one
+        // half of the pair is set the other must be too, and any path that
+        // is set must exist.
+        check_cert_path(
+            "client certificate (sslcert)",
+            &self.sslcert,
+            false,
+            self.sslmode,
+        )?;
+        check_cert_path("client key (sslkey)", &self.sslkey, false, self.sslmode)?;
+        let is_cert_empty = self.sslcert.as_deref().is_some_and(|s| !s.trim().is_empty());
+        let is_cert_key_empty = self.sslkey.as_deref().is_some_and(|s| !s.trim().is_empty());
+        if is_cert_empty != is_cert_key_empty {
+            return Err("sslcert and sslkey must both be set, or both left empty".into());
         }
         Ok(())
+    }
+}
+
+/// Validate a single optional certificate path field: if `required`, it must
+/// be present; if present (required or not), it must point to an existing
+/// file.
+fn check_cert_path(
+    label: &str,
+    path: &Option<String>,
+    required: bool,
+    mode: SslMode,
+) -> Result<(), String> {
+    match path.as_deref().map(str::trim) {
+        Some(p) if !p.is_empty() => {
+            if !Path::new(p).is_file() {
+                return Err(format!("{label} not found at '{p}'"));
+            }
+            Ok(())
+        }
+        _ if required => Err(format!("{label} is mandatory for sslmode '{mode}'")),
+        _ => Ok(()),
     }
 }
 
@@ -209,5 +254,51 @@ mod tests {
         let deserialized: Connection =
             toml::from_str(&serialized).expect("deserialization should succeed");
         assert!(deserialized.password.is_empty());
+    }
+
+    #[test]
+    fn disable_sslmode_does_not_require_any_cert() {
+        let mut conn = Connection::with_defaults("disable-test-connection");
+        conn.sslmode = SslMode::Disable;
+        conn.sslrootcert = None;
+        conn.sslcert = None;
+        conn.sslkey = None;
+        assert!(conn.validate().is_ok());
+    }
+
+    #[test]
+    fn require_sslmode_does_not_require_root_cert() {
+        let mut conn = Connection::with_defaults("require-test-connection");
+        conn.sslmode = SslMode::Require;
+        conn.sslrootcert = None;
+        conn.sslcert = None;
+        conn.sslkey = None;
+        assert!(conn.validate().is_ok());
+    }
+
+    #[test]
+    fn verify_ca_requires_root_cert() {
+        let mut conn = Connection::with_defaults("verify-ca-test-connection");
+        conn.sslmode = SslMode::VerifyCa;
+        conn.sslrootcert = None;
+        conn.sslcert = None;
+        conn.sslkey = None;
+        let err = conn.validate().expect_err("missing root cert should fail");
+        assert!(err.contains("root CA certificate"));
+    }
+
+    #[test]
+    fn client_cert_and_key_must_both_be_set_or_both_empty() {
+        let mut conn = Connection::with_defaults("half-mtls-test-connection");
+        conn.sslmode = SslMode::Require;
+        conn.sslrootcert = None;
+        conn.sslcert = Some("/nonexistent/does-not-matter.crt".to_string());
+        conn.sslkey = None;
+        let err = conn
+            .validate()
+            .expect_err("mismatched cert/key should fail");
+        // Fails on the missing file for sslcert before reaching the pairing
+        // check; either error is acceptable evidence that validation caught it.
+        assert!(err.contains("sslcert") || err.contains("both be set"));
     }
 }

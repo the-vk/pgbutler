@@ -8,17 +8,18 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::config::Connection;
+use crate::config::{Connection, SslMode};
 use crate::theme;
 use crate::ui::draw_banner;
 
-const FIELD_LABELS: [&str; 9] = [
+const FIELD_LABELS: [&str; 10] = [
     "Connection name",
     "Host",
     "Port",
     "Database",
     "User",
     "Password (optional)",
+    "SSL mode",
     "Root CA cert (sslrootcert)",
     "Client cert (sslcert)",
     "Client key (sslkey)",
@@ -27,9 +28,11 @@ const FIELD_LABELS: [&str; 9] = [
 /// Index of the password field within `values`/`FIELD_LABELS`, used to mask
 /// its display.
 const PASSWORD_FIELD: usize = 5;
+/// Index of the sslmode field within `values`/`FIELD_LABELS`.
+const SSLMODE_FIELD: usize = 6;
 
 pub struct SetupScreen {
-    values: [String; 9],
+    values: [String; 10],
     focus: usize,
     pub connecting: bool,
     pub error: Option<String>,
@@ -55,9 +58,10 @@ impl SetupScreen {
                 conn.catalog,
                 conn.login,
                 conn.password,
-                conn.sslrootcert,
-                conn.sslcert,
-                conn.sslkey,
+                conn.sslmode.to_string(),
+                conn.sslrootcert.unwrap_or_default(),
+                conn.sslcert.unwrap_or_default(),
+                conn.sslkey.unwrap_or_default(),
             ],
             focus: 0,
             connecting: false,
@@ -75,6 +79,15 @@ impl SetupScreen {
                 self.values[2]
             )
         })?;
+        let sslmode: SslMode = self.values[SSLMODE_FIELD].parse()?;
+        let non_empty = |s: &str| {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        };
         Ok(Connection {
             name: self.values[0].trim().to_string(),
             host: self.values[1].trim().to_string(),
@@ -82,9 +95,10 @@ impl SetupScreen {
             catalog: self.values[3].trim().to_string(),
             login: self.values[4].trim().to_string(),
             password: self.values[5].clone(),
-            sslrootcert: self.values[6].trim().to_string(),
-            sslcert: self.values[7].trim().to_string(),
-            sslkey: self.values[8].trim().to_string(),
+            sslmode,
+            sslrootcert: non_empty(&self.values[7]),
+            sslcert: non_empty(&self.values[8]),
+            sslkey: non_empty(&self.values[9]),
         })
     }
 
@@ -111,6 +125,9 @@ impl SetupScreen {
             KeyCode::BackTab | KeyCode::Up => {
                 self.focus = (self.focus + self.values.len() - 1) % self.values.len();
             }
+            KeyCode::Left | KeyCode::Right if self.focus == SSLMODE_FIELD => {
+                self.cycle_sslmode(key.code == KeyCode::Right);
+            }
             KeyCode::Backspace => {
                 self.values[self.focus].pop();
             }
@@ -127,6 +144,24 @@ impl SetupScreen {
             _ => {}
         }
         None
+    }
+
+    /// Cycle the sslmode field to the next/previous known mode, wrapping
+    /// around. Falls back to `verify-full` if the current text isn't a
+    /// recognized mode (e.g. the user was mid-edit).
+    fn cycle_sslmode(&mut self, forward: bool) {
+        let modes = SslMode::ALL;
+        let current = self.values[SSLMODE_FIELD]
+            .parse::<SslMode>()
+            .unwrap_or_default();
+        let pos = modes.iter().position(|m| *m == current).unwrap_or(0);
+        let len = modes.len();
+        let next = if forward {
+            (pos + 1) % len
+        } else {
+            (pos + len - 1) % len
+        };
+        self.values[SSLMODE_FIELD] = modes[next].to_string();
     }
 
     fn submit(&mut self) -> Option<Connection> {
@@ -162,11 +197,7 @@ impl SetupScreen {
             ])
             .split(area);
 
-        draw_banner(
-            frame,
-            chunks[0],
-            "Set up a PostgreSQL connection (mutual TLS required)",
-        );
+        draw_banner(frame, chunks[0], "Set up a PostgreSQL connection");
 
         let form_block = Block::default()
             .borders(Borders::ALL)
@@ -210,7 +241,7 @@ impl SetupScreen {
             ))
         } else {
             Line::from(Span::styled(
-                " Tab/Shift+Tab to move between fields, Enter to confirm, Ctrl+C to quit ",
+                " Tab/Shift+Tab to move, ←/→ to change SSL mode, Enter to confirm, Ctrl+C to quit ",
                 Style::default().fg(theme::MUTED),
             ))
         };
