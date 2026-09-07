@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+mod keyring;
+
+pub use keyring::{read_master_key, write_master_key};
+
 /// A single PostgreSQL connection profile, persisted to disk as TOML.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Connection {
