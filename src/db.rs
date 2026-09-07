@@ -54,6 +54,9 @@ pub async fn connect(conn: &Connection) -> Result<Client, DbError> {
         .dbname(&conn.catalog)
         .user(&conn.login)
         .ssl_mode(tokio_postgres::config::SslMode::Require);
+    if !conn.password.is_empty() {
+        pg_config.password(&conn.password);
+    }
 
     let (client, connection) = pg_config.connect(connector).await?;
 

@@ -12,19 +12,24 @@ use crate::config::Connection;
 use crate::theme;
 use crate::ui::draw_banner;
 
-const FIELD_LABELS: [&str; 8] = [
+const FIELD_LABELS: [&str; 9] = [
     "Connection name",
     "Host",
     "Port",
     "Database",
     "User",
+    "Password (optional)",
     "Root CA cert (sslrootcert)",
     "Client cert (sslcert)",
     "Client key (sslkey)",
 ];
 
+/// Index of the password field within `values`/`FIELD_LABELS`, used to mask
+/// its display.
+const PASSWORD_FIELD: usize = 5;
+
 pub struct SetupScreen {
-    values: [String; 8],
+    values: [String; 9],
     focus: usize,
     pub connecting: bool,
     pub error: Option<String>,
@@ -49,6 +54,7 @@ impl SetupScreen {
                 conn.port.to_string(),
                 conn.catalog,
                 conn.login,
+                conn.password,
                 conn.sslrootcert,
                 conn.sslcert,
                 conn.sslkey,
@@ -75,9 +81,10 @@ impl SetupScreen {
             port,
             catalog: self.values[3].trim().to_string(),
             login: self.values[4].trim().to_string(),
-            sslrootcert: self.values[5].trim().to_string(),
-            sslcert: self.values[6].trim().to_string(),
-            sslkey: self.values[7].trim().to_string(),
+            password: self.values[5].clone(),
+            sslrootcert: self.values[6].trim().to_string(),
+            sslcert: self.values[7].trim().to_string(),
+            sslkey: self.values[8].trim().to_string(),
         })
     }
 
@@ -179,13 +186,14 @@ impl SetupScreen {
             .split(inner);
 
         for (i, label) in FIELD_LABELS.iter().enumerate() {
-            self.draw_field(
-                frame,
-                field_rows[i],
-                label,
-                &self.values[i],
-                i == self.focus,
-            );
+            let masked;
+            let display_value = if i == PASSWORD_FIELD {
+                masked = "•".repeat(self.values[i].chars().count());
+                &masked
+            } else {
+                &self.values[i]
+            };
+            self.draw_field(frame, field_rows[i], label, display_value, i == self.focus);
         }
 
         let status = if self.connecting {

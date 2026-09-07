@@ -30,6 +30,15 @@ pub struct Connection {
     pub sslcert: String,
     /// Path to the client private key matching `sslcert`.
     pub sslkey: String,
+    /// Plaintext password for `login`, kept in memory only. Encrypted at
+    /// rest with the `crypto` module when the connection is serialized to
+    /// disk, and transparently decrypted back to plaintext when read.
+    #[serde(
+        default,
+        serialize_with = "serialize_password",
+        deserialize_with = "deserialize_password"
+    )]
+    pub password: String,
 }
 
 impl Connection {
@@ -46,6 +55,7 @@ impl Connection {
             sslrootcert: pg_dir.join("root.crt").to_string_lossy().into_owned(),
             sslcert: pg_dir.join("postgresql.crt").to_string_lossy().into_owned(),
             sslkey: pg_dir.join("postgresql.key").to_string_lossy().into_owned(),
+            password: String::new(),
         }
     }
 
@@ -81,6 +91,41 @@ fn whoami_fallback() -> String {
         .or_else(|_| std::env::var("USER"))
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "postgres".to_string())
+}
+
+/// Serialize the plaintext password field by encrypting it (AES-256-GCM via
+/// [`crate::crypto`]) and base64-encoding the ciphertext for safe storage in
+/// TOML. An empty password is stored as-is, without encryption, so that
+/// connections without a saved password don't force creation of a master key.
+fn serialize_password<S>(password: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::Error;
+    if password.is_empty() {
+        return serializer.serialize_str("");
+    }
+    let ciphertext = crate::crypto::encrypt(password.as_bytes()).map_err(S::Error::custom)?;
+    serializer.serialize_str(&openssl::base64::encode_block(&ciphertext))
+}
+
+/// Deserialize the password field, decrypting the base64-encoded ciphertext
+/// produced by [`serialize_password`] back to plaintext. An empty string
+/// (or a missing field, via `#[serde(default)]`) deserializes to an empty
+/// password.
+fn deserialize_password<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    use serde::de::Error;
+    let encoded = String::deserialize(deserializer)?;
+    if encoded.is_empty() {
+        return Ok(String::new());
+    }
+    let ciphertext = openssl::base64::decode_block(&encoded).map_err(D::Error::custom)?;
+    let plaintext = crate::crypto::decrypt(&ciphertext).map_err(D::Error::custom)?;
+    String::from_utf8(plaintext).map_err(D::Error::custom)
 }
 
 /// Root directory holding connection profiles: `~/.pgbutler/connections`.
@@ -132,4 +177,37 @@ fn sanitize_filename(name: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "touches the real macOS login Keychain (creates/reads the master key); run manually"]
+    fn password_is_encrypted_at_rest_and_round_trips() {
+        let mut conn = Connection::with_defaults("pw-test-connection");
+        conn.password = "s3cr3t-p@ssw0rd".to_string();
+
+        let serialized = toml::to_string_pretty(&conn).expect("serialization should succeed");
+        // The plaintext password must never appear in the serialized form.
+        assert!(!serialized.contains("s3cr3t-p@ssw0rd"));
+
+        let deserialized: Connection =
+            toml::from_str(&serialized).expect("deserialization should succeed");
+        assert_eq!(deserialized.password, conn.password);
+    }
+
+    #[test]
+    fn empty_password_round_trips_without_encryption() {
+        let conn = Connection::with_defaults("no-pw-test-connection");
+        assert!(conn.password.is_empty());
+
+        let serialized = toml::to_string_pretty(&conn).expect("serialization should succeed");
+        assert!(serialized.contains("password = \"\""));
+
+        let deserialized: Connection =
+            toml::from_str(&serialized).expect("deserialization should succeed");
+        assert!(deserialized.password.is_empty());
+    }
 }
