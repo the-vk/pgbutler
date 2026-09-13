@@ -7,9 +7,12 @@
 //! certificate/key pair is always optional and, when configured, is
 //! presented for mutual TLS regardless of mode (as long as TLS is in use).
 
+use std::collections::HashMap;
+
 use openssl::ssl::{SslFiletype, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use strum::{AsRefStr, Display};
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 
@@ -33,6 +36,8 @@ pub enum DbError {
     Tls(#[from] openssl::error::ErrorStack),
     #[error("connection failed: {0}")]
     Connect(#[from] tokio_postgres::Error),
+    #[error("JSON deserialization failed: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 #[derive(AsRefStr, Debug, Clone, Copy, Display, PartialEq, Eq)]
@@ -164,6 +169,101 @@ pub async fn explain(
     Ok(lines.join("\n"))
 }
 
+/// A top-level EXPLAIN result representing a statement's execution plan and metadata.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExplainStatement {
+    #[serde(rename = "Plan")]
+    pub plan: PlanNode,
+    #[serde(rename = "Settings", default)]
+    pub settings: Option<HashMap<String, Value>>,
+    #[serde(rename = "Planning", default)]
+    pub planning: Option<PlanningDetails>,
+    #[serde(rename = "Planning Time", default)]
+    pub planning_time: Option<f64>,
+    #[serde(rename = "Execution Time", default)]
+    pub execution_time: Option<f64>,
+    #[serde(rename = "Triggers", default)]
+    pub triggers: Option<Vec<Value>>,
+    #[serde(flatten)]
+    pub extra: HashMap<String, Value>,
+}
+
+/// Planning stage statistics (e.g. memory usage).
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanningDetails {
+    #[serde(rename = "Memory Used", default)]
+    pub memory_used: Option<i64>,
+    #[serde(rename = "Memory Allocated", default)]
+    pub memory_allocated: Option<i64>,
+    #[serde(flatten)]
+    pub extra: HashMap<String, Value>,
+}
+
+/// A node in PostgreSQL's query execution plan tree.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanNode {
+    #[serde(rename = "Node Type")]
+    pub node_type: String,
+    #[serde(rename = "Strategy", default)]
+    pub strategy: Option<String>,
+    #[serde(rename = "Partial Mode", default)]
+    pub partial_mode: Option<String>,
+    #[serde(rename = "Parent Relationship", default)]
+    pub parent_relationship: Option<String>,
+    #[serde(rename = "Parallel Aware", default)]
+    pub parallel_aware: Option<bool>,
+    #[serde(rename = "Async Capable", default)]
+    pub async_capable: Option<bool>,
+    #[serde(rename = "Relation Name", default)]
+    pub relation_name: Option<String>,
+    #[serde(rename = "Schema", default)]
+    pub schema: Option<String>,
+    #[serde(rename = "Alias", default)]
+    pub alias: Option<String>,
+    #[serde(rename = "Startup Cost", default)]
+    pub startup_cost: Option<f64>,
+    #[serde(rename = "Total Cost", default)]
+    pub total_cost: Option<f64>,
+    #[serde(rename = "Plan Rows", default)]
+    pub plan_rows: Option<f64>,
+    #[serde(rename = "Plan Width", default)]
+    pub plan_width: Option<i64>,
+    #[serde(rename = "Actual Startup Time", default)]
+    pub actual_startup_time: Option<f64>,
+    #[serde(rename = "Actual Total Time", default)]
+    pub actual_total_time: Option<f64>,
+    #[serde(rename = "Actual Rows", default)]
+    pub actual_rows: Option<f64>,
+    #[serde(rename = "Actual Loops", default)]
+    pub actual_loops: Option<i64>,
+    #[serde(rename = "Disabled", default)]
+    pub disabled: Option<bool>,
+    #[serde(rename = "Output", default)]
+    pub output: Option<Vec<String>>,
+    #[serde(rename = "Workers Planned", default)]
+    pub workers_planned: Option<i64>,
+    #[serde(rename = "Workers Launched", default)]
+    pub workers_launched: Option<i64>,
+    #[serde(rename = "Single Copy", default)]
+    pub single_copy: Option<bool>,
+    #[serde(rename = "Plans", default)]
+    pub plans: Option<Vec<PlanNode>>,
+    #[serde(flatten)]
+    pub extra: HashMap<String, Value>,
+}
+
+/// Run an `EXPLAIN` query with JSON format against PostgreSQL, parse the output,
+/// and return the deserialized query plan model.
+#[allow(dead_code)]
+pub async fn explain_model(client: &Client, sql: &str) -> Result<Vec<ExplainStatement>, DbError> {
+    let raw_json = explain(client, sql, Some(ExplainFormat::Json)).await?;
+    let model = serde_json::from_str(&raw_json)?;
+    Ok(model)
+}
+
 /// Detailed schema information for a single column in a PostgreSQL table.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,5 +373,107 @@ mod tests {
         let json = serde_json::to_string(&col).expect("serialize to json");
         let deserialized: TableColumn = serde_json::from_str(&json).expect("deserialize from json");
         assert_eq!(col, deserialized);
+    }
+
+    #[test]
+    fn explain_json_serde_deserialization() {
+        let json_data = r#"
+[
+  {
+    "Plan": {
+      "Node Type": "Aggregate",
+      "Strategy": "Plain",
+      "Partial Mode": "Finalize",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 16453.55,
+      "Total Cost": 16453.56,
+      "Plan Rows": 1,
+      "Plan Width": 8,
+      "Disabled": false,
+      "Output": ["count(*)"],
+      "Plans": [
+        {
+          "Node Type": "Gather",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Startup Cost": 16453.33,
+          "Total Cost": 16453.54,
+          "Plan Rows": 2,
+          "Plan Width": 8,
+          "Disabled": false,
+          "Output": ["(PARTIAL count(*))"],
+          "Workers Planned": 2,
+          "Single Copy": false,
+          "Plans": [
+            {
+              "Node Type": "Aggregate",
+              "Strategy": "Plain",
+              "Partial Mode": "Partial",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Startup Cost": 15453.33,
+              "Total Cost": 15453.34,
+              "Plan Rows": 1,
+              "Plan Width": 8,
+              "Disabled": false,
+              "Output": ["PARTIAL count(*)"],
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": true,
+                  "Async Capable": false,
+                  "Relation Name": "item",
+                  "Schema": "public",
+                  "Alias": "item",
+                  "Startup Cost": 0.00,
+                  "Total Cost": 14411.67,
+                  "Plan Rows": 416667,
+                  "Plan Width": 0,
+                  "Disabled": false,
+                  "Output": ["id", "name", "created_ts", "modified_ts"]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Settings": {
+    },
+    "Planning": {
+      "Memory Used": 14,
+      "Memory Allocated": 16
+    },
+    "Planning Time": 0.246
+  }
+]
+"#;
+
+        let statements: Vec<ExplainStatement> =
+            serde_json::from_str(json_data).expect("deserialize explain json");
+        assert_eq!(statements.len(), 1);
+
+        let stmt = &statements[0];
+        assert_eq!(stmt.plan.node_type, "Aggregate");
+        assert_eq!(stmt.plan.strategy.as_deref(), Some("Plain"));
+        assert_eq!(stmt.planning_time, Some(0.246));
+        assert_eq!(stmt.planning.as_ref().and_then(|p| p.memory_used), Some(14));
+
+        let gather = &stmt.plan.plans.as_ref().unwrap()[0];
+        assert_eq!(gather.node_type, "Gather");
+        assert_eq!(gather.workers_planned, Some(2));
+
+        let partial_agg = &gather.plans.as_ref().unwrap()[0];
+        assert_eq!(partial_agg.node_type, "Aggregate");
+
+        let seq_scan = &partial_agg.plans.as_ref().unwrap()[0];
+        assert_eq!(seq_scan.node_type, "Seq Scan");
+        assert_eq!(seq_scan.relation_name.as_deref(), Some("item"));
+        assert_eq!(seq_scan.schema.as_deref(), Some("public"));
+        assert_eq!(seq_scan.plan_rows, Some(416667.0));
     }
 }
