@@ -100,24 +100,7 @@ impl ChatScreen {
                     || text.starts_with("/explain ")
                     || text.starts_with("/explain\t")
                 {
-                    let query = text.strip_prefix("/explain").unwrap().trim().to_string();
-                    if query.is_empty() {
-                        self.messages.push(Message {
-                            role: Role::User,
-                            content: text,
-                        });
-                        self.messages.push(Message {
-                            role: Role::System,
-                            content: "Usage: /explain <SQL query>".to_string(),
-                        });
-                        return None;
-                    }
-                    self.messages.push(Message {
-                        role: Role::User,
-                        content: text,
-                    });
-                    self.busy = true;
-                    return Some(ChatAction::Explain(query));
+                    return self.handle_explain_command(&text);
                 }
                 self.messages.push(Message {
                     role: Role::User,
@@ -131,6 +114,27 @@ impl ChatScreen {
         None
     }
 
+    fn handle_explain_command(&mut self, text: &str) -> Option<ChatAction> {
+        let query = text.strip_prefix("/explain").unwrap().trim().to_string();
+        if query.is_empty() {
+            self.messages.push(Message {
+                role: Role::User,
+                content: text.to_owned(),
+            });
+            self.messages.push(Message {
+                role: Role::System,
+                content: "Usage: /explain <SQL query>".to_string(),
+            });
+            return None;
+        }
+        self.messages.push(Message {
+            role: Role::User,
+            content: text.to_owned(),
+        });
+        self.busy = true;
+        return Some(ChatAction::Explain(query));
+    }
+    
     /// Handle client-side slash commands. Returns `Some(reply)` if handled
     /// locally (no DB round-trip needed).
     fn handle_local_command(&self, text: &str) -> Option<String> {
