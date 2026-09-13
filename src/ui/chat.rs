@@ -149,7 +149,10 @@ impl ChatScreen {
         draw_banner(
             frame,
             chunks[0],
-            &format!("{} — {}@{}", self.conn.name, self.conn.login, self.conn.host),
+            &format!(
+                "{} — {}@{}",
+                self.conn.name, self.conn.login, self.conn.host
+            ),
         );
 
         let mut lines: Vec<Line> = Vec::new();

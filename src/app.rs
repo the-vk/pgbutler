@@ -151,7 +151,10 @@ impl App {
         let tx = self.events_tx.clone();
         tokio::spawn(async move {
             let result = db::connect(&conn).await.map_err(|e| e.to_string());
-            let _ = tx.send(AppEvent::ConnectResult { conn: Box::new(conn), result });
+            let _ = tx.send(AppEvent::ConnectResult {
+                conn: Box::new(conn),
+                result,
+            });
         });
     }
 

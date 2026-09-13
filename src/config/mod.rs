@@ -101,7 +101,10 @@ impl Connection {
             self.sslmode,
         )?;
         check_cert_path("client key (sslkey)", &self.sslkey, false, self.sslmode)?;
-        let is_cert_empty = self.sslcert.as_deref().is_some_and(|s| !s.trim().is_empty());
+        let is_cert_empty = self
+            .sslcert
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
         let is_cert_key_empty = self.sslkey.as_deref().is_some_and(|s| !s.trim().is_empty());
         if is_cert_empty != is_cert_key_empty {
             return Err("sslcert and sslkey must both be set, or both left empty".into());
