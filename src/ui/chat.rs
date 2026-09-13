@@ -29,6 +29,12 @@ pub struct Message {
     pub content: String,
 }
 
+/// Action to execute in the background when the user submits input.
+pub enum ChatAction {
+    Query(String),
+    Explain(String),
+}
+
 pub struct ChatScreen {
     pub conn: Connection,
     pub client: Arc<Client>,
@@ -58,9 +64,9 @@ impl ChatScreen {
         }
     }
 
-    /// Handle a key press. Returns `Some(sql)` when a statement should be
-    /// executed against the database.
-    pub fn handle_key(&mut self, key: KeyEvent) -> Option<String> {
+    /// Handle a key press. Returns `Some(action)` when a query or command should
+    /// be executed against the database.
+    pub fn handle_key(&mut self, key: KeyEvent) -> Option<ChatAction> {
         if self.busy {
             return None;
         }
@@ -90,12 +96,35 @@ impl ChatScreen {
                     });
                     return None;
                 }
+                if text == "/explain"
+                    || text.starts_with("/explain ")
+                    || text.starts_with("/explain\t")
+                {
+                    let query = text.strip_prefix("/explain").unwrap().trim().to_string();
+                    if query.is_empty() {
+                        self.messages.push(Message {
+                            role: Role::User,
+                            content: text,
+                        });
+                        self.messages.push(Message {
+                            role: Role::System,
+                            content: "Usage: /explain <SQL query>".to_string(),
+                        });
+                        return None;
+                    }
+                    self.messages.push(Message {
+                        role: Role::User,
+                        content: text,
+                    });
+                    self.busy = true;
+                    return Some(ChatAction::Explain(query));
+                }
                 self.messages.push(Message {
                     role: Role::User,
                     content: text.clone(),
                 });
                 self.busy = true;
-                return Some(text);
+                return Some(ChatAction::Query(text));
             }
             _ => {}
         }
@@ -107,7 +136,7 @@ impl ChatScreen {
     fn handle_local_command(&self, text: &str) -> Option<String> {
         match text {
             "/help" => Some(
-                "Commands: /help (this message), /whoami (show connection info). \
+                "Commands: /help (this message), /whoami (show connection info), /explain <query> (explain query plan). \
                  Anything else is sent to PostgreSQL as SQL."
                     .to_string(),
             ),
@@ -125,6 +154,20 @@ impl ChatScreen {
             Ok(outcome) => self.messages.push(Message {
                 role: Role::Assistant,
                 content: format_outcome(&outcome),
+            }),
+            Err(err) => self.messages.push(Message {
+                role: Role::Error,
+                content: err,
+            }),
+        }
+    }
+
+    pub fn on_explain_result(&mut self, result: Result<String, String>) {
+        self.busy = false;
+        match result {
+            Ok(output) => self.messages.push(Message {
+                role: Role::Assistant,
+                content: output,
             }),
             Err(err) => self.messages.push(Message {
                 role: Role::Error,

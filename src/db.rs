@@ -127,3 +127,23 @@ pub async fn run_query(client: &Client, sql: &str) -> Result<QueryOutcome, DbErr
 
     Ok(outcome)
 }
+
+/// Run an `EXPLAIN` query with detailed settings against PostgreSQL and
+/// return the formatted plan output as a multi-line string.
+pub async fn explain(client: &Client, sql: &str) -> Result<String, DbError> {
+    let query = format!(
+        "explain (analyze true, verbose true, costs true, settings true, memory true, buffers true, wal true, serialize text, timing true) {sql}"
+    );
+    let messages = client.simple_query(&query).await?;
+    let mut lines = Vec::new();
+
+    for message in messages {
+        if let SimpleQueryMessage::Row(row) = message
+            && let Some(val) = row.get(0)
+        {
+            lines.push(val.to_string());
+        }
+    }
+
+    Ok(lines.join("\n"))
+}

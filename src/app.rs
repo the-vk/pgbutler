@@ -11,7 +11,7 @@ use tokio_postgres::Client;
 
 use crate::config::Connection;
 use crate::db::{self, QueryOutcome};
-use crate::ui::chat::ChatScreen;
+use crate::ui::chat::{ChatAction, ChatScreen};
 use crate::ui::setup::SetupScreen;
 
 /// Top-level screen currently being shown.
@@ -21,12 +21,14 @@ pub enum Screen {
 }
 
 /// Events produced by background async work and fed back into the main loop.
+#[allow(clippy::enum_variant_names)]
 pub enum AppEvent {
     ConnectResult {
         conn: Box<Connection>,
         result: Result<Client, String>,
     },
     QueryResult(Result<QueryOutcome, String>),
+    ExplainResult(Result<String, String>),
 }
 
 pub struct App {
@@ -117,8 +119,11 @@ impl App {
                     }
                 }
                 Screen::Chat(chat) => {
-                    if let Some(sql) = chat.handle_key(key) {
-                        self.spawn_query(sql);
+                    if let Some(action) = chat.handle_key(key) {
+                        match action {
+                            ChatAction::Query(sql) => self.spawn_query(sql),
+                            ChatAction::Explain(sql) => self.spawn_explain(sql),
+                        }
                     }
                 }
             }
@@ -144,6 +149,11 @@ impl App {
                     chat.on_query_result(result);
                 }
             }
+            AppEvent::ExplainResult(result) => {
+                if let Screen::Chat(chat) = &mut self.screen {
+                    chat.on_explain_result(result);
+                }
+            }
         }
     }
 
@@ -167,6 +177,17 @@ impl App {
                     .await
                     .map_err(|e| e.to_string());
                 let _ = tx.send(AppEvent::QueryResult(result));
+            });
+        }
+    }
+
+    fn spawn_explain(&self, sql: String) {
+        let tx = self.events_tx.clone();
+        if let Screen::Chat(chat) = &self.screen {
+            let client = Arc::clone(&chat.client);
+            tokio::spawn(async move {
+                let result = db::explain(&client, &sql).await.map_err(|e| e.to_string());
+                let _ = tx.send(AppEvent::ExplainResult(result));
             });
         }
     }
