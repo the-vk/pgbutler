@@ -96,26 +96,36 @@ impl ChatScreen {
                     });
                     return None;
                 }
-                if text == "/explain"
-                    || text.starts_with("/explain ")
-                    || text.starts_with("/explain\t")
-                {
-                    return self.handle_explain_command(&text);
-                }
-                self.messages.push(Message {
-                    role: Role::User,
-                    content: text.clone(),
-                });
-                self.busy = true;
-                return Some(ChatAction::Query(text));
+                if let Some(action) = self.parse_chat_command(&text) {
+                    self.messages.push(Message {
+                        role: Role::User,
+                        content: text.clone(),
+                    });
+                    self.busy = true;
+                    return Some(action);
+                };
+                
             }
             _ => {}
         }
         None
     }
 
-    fn handle_explain_command(&mut self, text: &str) -> Option<ChatAction> {
-        let query = text.strip_prefix("/explain").unwrap().trim().to_string();
+
+
+    fn parse_chat_command(&mut self, text: &str) -> Option<ChatAction> {
+        if let Some((command, rest)) = text.split_once(|ch: char| ch.is_ascii_whitespace()) {
+            match command {
+                "/explain" => self.handle_explain_command(text, rest),
+                "/query" => Some(ChatAction::Query(rest.to_owned())),
+                _ => None
+            }
+        } else {
+            None
+        }
+    }
+
+    fn handle_explain_command(&mut self, text: &str, query: &str) -> Option<ChatAction> {
         if query.is_empty() {
             self.messages.push(Message {
                 role: Role::User,
@@ -132,7 +142,7 @@ impl ChatScreen {
             content: text.to_owned(),
         });
         self.busy = true;
-        return Some(ChatAction::Explain(query));
+        return Some(ChatAction::Explain(query.to_owned()));
     }
     
     /// Handle client-side slash commands. Returns `Some(reply)` if handled
