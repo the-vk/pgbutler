@@ -117,7 +117,7 @@ impl ChatScreen {
             "/query" => Some(ChatAction::Query(query.to_owned())),
             "/help" => self.handle_help_command(text),
             "/whoami" => self.handle_whoami_command(text),
-            _ => None
+            _ => None,
         }
     }
 
@@ -157,9 +157,9 @@ impl ChatScreen {
 
     fn handle_whoami_command(&mut self, text: &str) -> Option<ChatAction> {
         let reply = format!(
-                "{}@{}:{}/{} — verify-full mTLS",
-                self.conn.login, self.conn.host, self.conn.port, self.conn.catalog
-            );
+            "{}@{}:{}/{} — verify-full mTLS",
+            self.conn.login, self.conn.host, self.conn.port, self.conn.catalog
+        );
         self.messages.push(Message {
             role: Role::User,
             content: text.to_owned(),
