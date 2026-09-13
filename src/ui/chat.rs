@@ -85,17 +85,6 @@ impl ChatScreen {
                 if text.is_empty() {
                     return None;
                 }
-                if let Some(reply) = self.handle_local_command(&text) {
-                    self.messages.push(Message {
-                        role: Role::User,
-                        content: text,
-                    });
-                    self.messages.push(Message {
-                        role: Role::System,
-                        content: reply,
-                    });
-                    return None;
-                }
                 if let Some(action) = self.parse_chat_command(&text) {
                     self.messages.push(Message {
                         role: Role::User,
@@ -104,24 +93,31 @@ impl ChatScreen {
                     self.busy = true;
                     return Some(action);
                 };
-                
             }
             _ => {}
         }
         None
     }
 
-
-
     fn parse_chat_command(&mut self, text: &str) -> Option<ChatAction> {
+        let text_trimmed = text.trim();
+        if text_trimmed.find(|ch: char| ch.is_ascii_whitespace()) == None {
+            return self.match_command(text_trimmed, text_trimmed, "");
+        }
         if let Some((command, rest)) = text.split_once(|ch: char| ch.is_ascii_whitespace()) {
-            match command {
-                "/explain" => self.handle_explain_command(text, rest),
-                "/query" => Some(ChatAction::Query(rest.to_owned())),
-                _ => None
-            }
+            self.match_command(text, command, rest)
         } else {
             None
+        }
+    }
+
+    fn match_command(&mut self, text: &str, command: &str, query: &str) -> Option<ChatAction> {
+        match command {
+            "/explain" => self.handle_explain_command(text, query),
+            "/query" => Some(ChatAction::Query(query.to_owned())),
+            "/help" => self.handle_help_command(text),
+            "/whoami" => self.handle_whoami_command(text),
+            _ => None
         }
     }
 
@@ -144,22 +140,35 @@ impl ChatScreen {
         self.busy = true;
         return Some(ChatAction::Explain(query.to_owned()));
     }
-    
-    /// Handle client-side slash commands. Returns `Some(reply)` if handled
-    /// locally (no DB round-trip needed).
-    fn handle_local_command(&self, text: &str) -> Option<String> {
-        match text {
-            "/help" => Some(
-                "Commands: /help (this message), /whoami (show connection info), /explain <query> (explain query plan). \
-                 Anything else is sent to PostgreSQL as SQL."
-                    .to_string(),
-            ),
-            "/whoami" => Some(format!(
+
+    fn handle_help_command(&mut self, text: &str) -> Option<ChatAction> {
+        let reply = "Commands: /help (this message), /whoami (show connection info), /explain <query> (explain query plan). \
+                 Anything else is sent to PostgreSQL as SQL.";
+        self.messages.push(Message {
+            role: Role::User,
+            content: text.to_owned(),
+        });
+        self.messages.push(Message {
+            role: Role::System,
+            content: reply.to_string(),
+        });
+        return None;
+    }
+
+    fn handle_whoami_command(&mut self, text: &str) -> Option<ChatAction> {
+        let reply = format!(
                 "{}@{}:{}/{} — verify-full mTLS",
                 self.conn.login, self.conn.host, self.conn.port, self.conn.catalog
-            )),
-            _ => None,
-        }
+            );
+        self.messages.push(Message {
+            role: Role::User,
+            content: text.to_owned(),
+        });
+        self.messages.push(Message {
+            role: Role::System,
+            content: reply.to_string(),
+        });
+        return None;
     }
 
     pub fn on_query_result(&mut self, result: Result<QueryOutcome, String>) {
