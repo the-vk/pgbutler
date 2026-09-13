@@ -9,6 +9,7 @@
 
 use openssl::ssl::{SslFiletype, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
+use serde::{Deserialize, Serialize};
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 
 use crate::config::Connection;
@@ -146,4 +147,116 @@ pub async fn explain(client: &Client, sql: &str) -> Result<String, DbError> {
     }
 
     Ok(lines.join("\n"))
+}
+
+/// Detailed schema information for a single column in a PostgreSQL table.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableColumn {
+    pub catalog_name: Option<String>,
+    pub schema_name: String,
+    pub table_name: String,
+    pub ordinal_position: i32,
+    pub column_name: String,
+    pub data_type: String,
+    pub type_details: String,
+    pub is_nullable: String,
+    pub column_default: Option<String>,
+    pub is_identity: String,
+    pub identity_generation: Option<String>,
+    pub collation_name: Option<String>,
+}
+
+const TABLE_SCHEMA_QUERY: &str = r#"
+SELECT
+    t.table_catalog  AS catalog_name,
+    t.table_schema   AS schema_name,
+    t.table_name,
+    c.ordinal_position,
+    c.column_name,
+    c.data_type,
+    COALESCE(
+        CASE
+            WHEN c.character_maximum_length IS NOT NULL
+                THEN ' (' || c.character_maximum_length || ')'
+            WHEN c.numeric_precision IS NOT NULL AND c.data_type LIKE 'timestamp%'
+                THEN ' (' || c.numeric_precision || ')'
+            WHEN c.numeric_precision IS NOT NULL
+                THEN ' (' || c.numeric_precision || ',' || COALESCE(c.numeric_scale, 0) || ')'
+        END, ''
+    ) AS type_details,
+    c.is_nullable,
+    c.column_default,
+    c.is_identity,
+    c.identity_generation,
+    c.collation_name
+FROM information_schema.tables t
+JOIN information_schema.columns c
+    ON c.table_catalog = t.table_catalog
+   AND c.table_schema  = t.table_schema
+   AND c.table_name    = t.table_name
+WHERE t.table_type = 'BASE TABLE'
+  AND t.table_schema NOT IN ('pg_catalog', 'information_schema')
+  AND t.table_schema = $1
+  AND t.table_name = $2
+ORDER BY t.table_schema, t.table_name, c.ordinal_position;
+"#;
+
+/// Query detailed schema information for columns of the given table.
+#[allow(dead_code)]
+pub async fn get_table_schema(
+    client: &Client,
+    schema_name: &str,
+    table_name: &str,
+) -> Result<Vec<TableColumn>, DbError> {
+    let rows = client
+        .query(TABLE_SCHEMA_QUERY, &[&schema_name, &table_name])
+        .await?;
+
+    let columns = rows
+        .into_iter()
+        .map(|row| TableColumn {
+            catalog_name: row.get("catalog_name"),
+            schema_name: row.get("schema_name"),
+            table_name: row.get("table_name"),
+            ordinal_position: row.get("ordinal_position"),
+            column_name: row.get("column_name"),
+            data_type: row.get("data_type"),
+            type_details: row.get("type_details"),
+            is_nullable: row.get("is_nullable"),
+            column_default: row.get("column_default"),
+            is_identity: row.get("is_identity"),
+            identity_generation: row.get("identity_generation"),
+            collation_name: row.get("collation_name"),
+        })
+        .collect();
+
+    Ok(columns)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_column_serde_roundtrip_json() {
+        let col = TableColumn {
+            catalog_name: Some("postgres".to_string()),
+            schema_name: "public".to_string(),
+            table_name: "item".to_string(),
+            ordinal_position: 1,
+            column_name: "id".to_string(),
+            data_type: "uuid".to_string(),
+            type_details: "".to_string(),
+            is_nullable: "NO".to_string(),
+            column_default: Some("uuidv7()".to_string()),
+            is_identity: "NO".to_string(),
+            identity_generation: None,
+            collation_name: None,
+        };
+
+        let json = serde_json::to_string(&col).expect("serialize to json");
+        let deserialized: TableColumn = serde_json::from_str(&json).expect("deserialize from json");
+        assert_eq!(col, deserialized);
+    }
 }
