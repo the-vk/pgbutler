@@ -36,12 +36,12 @@ pub enum DbError {
 }
 
 #[derive(AsRefStr, Debug, Clone, Copy, Display, PartialEq, Eq)]
-#[strum(serialize_all="lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum ExplainFormat {
     Text,
     Xml,
     Json,
-    Yaml
+    Yaml,
 }
 
 /// Connect to PostgreSQL, applying TLS according to `conn.sslmode`.
@@ -141,7 +141,11 @@ pub async fn run_query(client: &Client, sql: &str) -> Result<QueryOutcome, DbErr
 
 /// Run an `EXPLAIN` query with detailed settings against PostgreSQL and
 /// return the formatted plan output as a multi-line string.
-pub async fn explain(client: &Client, sql: &str, format: Option<ExplainFormat>) -> Result<String, DbError> {
+pub async fn explain(
+    client: &Client,
+    sql: &str,
+    format: Option<ExplainFormat>,
+) -> Result<String, DbError> {
     let explain_format = format.unwrap_or(ExplainFormat::Text);
     let query = format!(
         "explain (analyze true, verbose true, costs true, settings true, memory true, buffers true, wal true, serialize text, timing true, format {explain_format}) {sql}"
