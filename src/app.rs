@@ -186,7 +186,9 @@ impl App {
         if let Screen::Chat(chat) = &self.screen {
             let client = Arc::clone(&chat.client);
             tokio::spawn(async move {
-                let result = db::explain(&client, &sql, None).await.map_err(|e| e.to_string());
+                let result = db::explain(&client, &sql, None)
+                    .await
+                    .map_err(|e| e.to_string());
                 let _ = tx.send(AppEvent::ExplainResult(result));
             });
         }
