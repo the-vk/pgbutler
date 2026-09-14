@@ -272,12 +272,14 @@ impl PlanNode {
 
 /// Query analysis data containing the structured query plan and table schemas.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct QueryAnalysisData {
     pub statements: Vec<ExplainStatement>,
     pub table_schemas: HashMap<String, Vec<TableColumn>>,
 }
 
 /// Collect query execution plan and table schema details for all tables referenced in the query.
+#[allow(dead_code)]
 pub async fn collect_query_analysis(
     client: &Client,
     sql: &str,
