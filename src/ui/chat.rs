@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use tokio_postgres::Client;
 
 use crate::config::Connection;
-use crate::db::{QueryAnalysisData, QueryOutcome};
+use crate::db::QueryOutcome;
 use crate::theme;
 use crate::ui::draw_banner;
 
@@ -221,33 +221,13 @@ impl ChatScreen {
         }
     }
 
-    pub fn on_analyze_result(&mut self, result: Result<QueryAnalysisData, String>) {
+    pub fn on_analyze_result(&mut self, result: Result<String, String>) {
         self.busy = false;
         match result {
-            Ok(data) => {
-                let mut content = format!(
-                    "Collected query plan ({} statement(s))\n",
-                    data.statements.len()
-                );
-                if data.table_schemas.is_empty() {
-                    content.push_str("No base tables found in query plan.");
-                } else {
-                    content.push_str("Table schemas:\n");
-                    for (table, cols) in &data.table_schemas {
-                        content.push_str(&format!("  • {table} ({} column(s))\n", cols.len()));
-                        for col in cols {
-                            content.push_str(&format!(
-                                "      - {}: {}{}\n",
-                                col.column_name, col.data_type, col.type_details
-                            ));
-                        }
-                    }
-                }
-                self.messages.push(Message {
-                    role: Role::Assistant,
-                    content: content.trim_end().to_string(),
-                });
-            }
+            Ok(output) => self.messages.push(Message {
+                role: Role::Assistant,
+                content: output,
+            }),
             Err(err) => self.messages.push(Message {
                 role: Role::Error,
                 content: err,

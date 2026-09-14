@@ -9,8 +9,9 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 use tokio_postgres::Client;
 
+use crate::agent;
 use crate::config::Connection;
-use crate::db::{self, QueryAnalysisData, QueryOutcome};
+use crate::db::{self, QueryOutcome};
 use crate::ui::chat::{ChatAction, ChatScreen};
 use crate::ui::setup::SetupScreen;
 
@@ -29,7 +30,7 @@ pub enum AppEvent {
     },
     QueryResult(Result<QueryOutcome, String>),
     ExplainResult(Result<String, String>),
-    AnalyzeResult(Result<QueryAnalysisData, String>),
+    AnalyzeResult(Result<String, String>),
 }
 
 pub struct App {
@@ -206,7 +207,7 @@ impl App {
         if let Screen::Chat(chat) = &self.screen {
             let client = Arc::clone(&chat.client);
             tokio::spawn(async move {
-                let result = db::collect_query_analysis(&client, &sql)
+                let result = agent::analyze_query(client, &sql, None, None)
                     .await
                     .map_err(|e| e.to_string());
                 let _ = tx.send(AppEvent::AnalyzeResult(result));
