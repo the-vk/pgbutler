@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio_postgres::Client;
 
 use crate::config::Connection;
-use crate::db::{self, QueryOutcome};
+use crate::db::{self, QueryAnalysisData, QueryOutcome};
 use crate::ui::chat::{ChatAction, ChatScreen};
 use crate::ui::setup::SetupScreen;
 
@@ -29,6 +29,7 @@ pub enum AppEvent {
     },
     QueryResult(Result<QueryOutcome, String>),
     ExplainResult(Result<String, String>),
+    AnalyzeResult(Result<QueryAnalysisData, String>),
 }
 
 pub struct App {
@@ -123,6 +124,7 @@ impl App {
                         match action {
                             ChatAction::Query(sql) => self.spawn_query(sql),
                             ChatAction::Explain(sql) => self.spawn_explain(sql),
+                            ChatAction::Analyze(sql) => self.spawn_analyze(sql),
                         }
                     }
                 }
@@ -152,6 +154,11 @@ impl App {
             AppEvent::ExplainResult(result) => {
                 if let Screen::Chat(chat) = &mut self.screen {
                     chat.on_explain_result(result);
+                }
+            }
+            AppEvent::AnalyzeResult(result) => {
+                if let Screen::Chat(chat) = &mut self.screen {
+                    chat.on_analyze_result(result);
                 }
             }
         }
@@ -190,6 +197,19 @@ impl App {
                     .await
                     .map_err(|e| e.to_string());
                 let _ = tx.send(AppEvent::ExplainResult(result));
+            });
+        }
+    }
+
+    fn spawn_analyze(&self, sql: String) {
+        let tx = self.events_tx.clone();
+        if let Screen::Chat(chat) = &self.screen {
+            let client = Arc::clone(&chat.client);
+            tokio::spawn(async move {
+                let result = db::collect_query_analysis(&client, &sql)
+                    .await
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(AppEvent::AnalyzeResult(result));
             });
         }
     }

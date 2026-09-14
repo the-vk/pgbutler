@@ -255,6 +255,54 @@ pub struct PlanNode {
     pub extra: HashMap<String, Value>,
 }
 
+impl PlanNode {
+    /// Recursively collect all `(schema, relation_name)` pairs from this plan node and all child plans.
+    pub fn collect_relations_into(&self, acc: &mut Vec<(String, String)>, default_schema: &str) {
+        if let Some(rel) = &self.relation_name {
+            let schema = self.schema.as_deref().unwrap_or(default_schema).to_string();
+            acc.push((schema, rel.clone()));
+        }
+        if let Some(sub_plans) = &self.plans {
+            for sub in sub_plans {
+                sub.collect_relations_into(acc, default_schema);
+            }
+        }
+    }
+}
+
+/// Query analysis data containing the structured query plan and table schemas.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryAnalysisData {
+    pub statements: Vec<ExplainStatement>,
+    pub table_schemas: HashMap<String, Vec<TableColumn>>,
+}
+
+/// Collect query execution plan and table schema details for all tables referenced in the query.
+pub async fn collect_query_analysis(
+    client: &Client,
+    sql: &str,
+) -> Result<QueryAnalysisData, DbError> {
+    let statements = explain_model(client, sql).await?;
+    let mut relations = Vec::new();
+    for stmt in &statements {
+        stmt.plan.collect_relations_into(&mut relations, "public");
+    }
+    relations.sort();
+    relations.dedup();
+
+    let mut table_schemas = HashMap::new();
+    for (schema, table) in relations {
+        let columns = get_table_schema(client, &schema, &table).await?;
+        let key = format!("{schema}.{table}");
+        table_schemas.insert(key, columns);
+    }
+
+    Ok(QueryAnalysisData {
+        statements,
+        table_schemas,
+    })
+}
+
 /// Run an `EXPLAIN` query with JSON format against PostgreSQL, parse the output,
 /// and return the deserialized query plan model.
 #[allow(dead_code)]
@@ -475,5 +523,9 @@ mod tests {
         assert_eq!(seq_scan.relation_name.as_deref(), Some("item"));
         assert_eq!(seq_scan.schema.as_deref(), Some("public"));
         assert_eq!(seq_scan.plan_rows, Some(416667.0));
+
+        let mut relations = Vec::new();
+        stmt.plan.collect_relations_into(&mut relations, "public");
+        assert_eq!(relations, vec![("public".to_string(), "item".to_string())]);
     }
 }

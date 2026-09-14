@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use tokio_postgres::Client;
 
 use crate::config::Connection;
-use crate::db::QueryOutcome;
+use crate::db::{QueryAnalysisData, QueryOutcome};
 use crate::theme;
 use crate::ui::draw_banner;
 
@@ -33,6 +33,7 @@ pub struct Message {
 pub enum ChatAction {
     Query(String),
     Explain(String),
+    Analyze(String),
 }
 
 pub struct ChatScreen {
@@ -113,12 +114,33 @@ impl ChatScreen {
 
     fn match_command(&mut self, text: &str, command: &str, query: &str) -> Option<ChatAction> {
         match command {
+            "/analyze" => self.handle_analyze_command(text, query),
             "/explain" => self.handle_explain_command(text, query),
             "/query" => Some(ChatAction::Query(query.to_owned())),
             "/help" => self.handle_help_command(text),
             "/whoami" => self.handle_whoami_command(text),
             _ => None,
         }
+    }
+
+    fn handle_analyze_command(&mut self, text: &str, query: &str) -> Option<ChatAction> {
+        if query.is_empty() {
+            self.messages.push(Message {
+                role: Role::User,
+                content: text.to_owned(),
+            });
+            self.messages.push(Message {
+                role: Role::System,
+                content: "Usage: /analyze <SQL query>".to_string(),
+            });
+            return None;
+        }
+        self.messages.push(Message {
+            role: Role::User,
+            content: text.to_owned(),
+        });
+        self.busy = true;
+        Some(ChatAction::Analyze(query.to_owned()))
     }
 
     fn handle_explain_command(&mut self, text: &str, query: &str) -> Option<ChatAction> {
@@ -142,7 +164,7 @@ impl ChatScreen {
     }
 
     fn handle_help_command(&mut self, text: &str) -> Option<ChatAction> {
-        let reply = "Commands: /help (this message), /whoami (show connection info), /explain <query> (explain query plan). \
+        let reply = "Commands: /help (this message), /whoami (show connection info), /explain <query> (explain query plan), /analyze <query> (analyze query plan and schemas). \
                  Anything else is sent to PostgreSQL as SQL.";
         self.messages.push(Message {
             role: Role::User,
@@ -192,6 +214,40 @@ impl ChatScreen {
                 role: Role::Assistant,
                 content: output,
             }),
+            Err(err) => self.messages.push(Message {
+                role: Role::Error,
+                content: err,
+            }),
+        }
+    }
+
+    pub fn on_analyze_result(&mut self, result: Result<QueryAnalysisData, String>) {
+        self.busy = false;
+        match result {
+            Ok(data) => {
+                let mut content = format!(
+                    "Collected query plan ({} statement(s))\n",
+                    data.statements.len()
+                );
+                if data.table_schemas.is_empty() {
+                    content.push_str("No base tables found in query plan.");
+                } else {
+                    content.push_str("Table schemas:\n");
+                    for (table, cols) in &data.table_schemas {
+                        content.push_str(&format!("  • {table} ({} column(s))\n", cols.len()));
+                        for col in cols {
+                            content.push_str(&format!(
+                                "      - {}: {}{}\n",
+                                col.column_name, col.data_type, col.type_details
+                            ));
+                        }
+                    }
+                }
+                self.messages.push(Message {
+                    role: Role::Assistant,
+                    content: content.trim_end().to_string(),
+                });
+            }
             Err(err) => self.messages.push(Message {
                 role: Role::Error,
                 content: err,
