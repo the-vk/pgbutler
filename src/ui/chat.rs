@@ -87,10 +87,6 @@ impl ChatScreen {
                     return None;
                 }
                 if let Some(action) = self.parse_chat_command(&text) {
-                    self.messages.push(Message {
-                        role: Role::User,
-                        content: text.clone(),
-                    });
                     self.busy = true;
                     return Some(action);
                 };
