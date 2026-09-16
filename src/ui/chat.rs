@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use tokio_postgres::Client;
 
 use crate::config::Connection;
-use crate::db::QueryOutcome;
+use crate::db::{QueryOutcome, RelKind};
 use crate::theme;
 use crate::ui::draw_banner;
 
@@ -34,6 +34,7 @@ pub enum ChatAction {
     Query(String),
     Explain(String),
     Analyze(String),
+    RelKind(String, String),
 }
 
 pub struct ChatScreen {
@@ -112,6 +113,7 @@ impl ChatScreen {
         match command {
             "/analyze" => self.handle_analyze_command(text, query),
             "/explain" => self.handle_explain_command(text, query),
+            "/relkind" => self.handle_relkind_command(text, query),
             "/query" => Some(ChatAction::Query(query.to_owned())),
             "/help" => self.handle_help_command(text),
             "/whoami" => self.handle_whoami_command(text),
@@ -159,8 +161,33 @@ impl ChatScreen {
         return Some(ChatAction::Explain(query.to_owned()));
     }
 
+    fn handle_relkind_command(&mut self, text: &str, query: &str) -> Option<ChatAction> {
+        let arg = query.trim();
+        if let Some((schema, relation)) = arg.split_once('.') {
+            let schema = schema.trim();
+            let relation = relation.trim();
+            if !schema.is_empty() && !relation.is_empty() {
+                self.messages.push(Message {
+                    role: Role::User,
+                    content: text.to_owned(),
+                });
+                self.busy = true;
+                return Some(ChatAction::RelKind(schema.to_owned(), relation.to_owned()));
+            }
+        }
+        self.messages.push(Message {
+            role: Role::User,
+            content: text.to_owned(),
+        });
+        self.messages.push(Message {
+            role: Role::System,
+            content: "Usage: /relkind <schema_name>.<relation_name>".to_string(),
+        });
+        None
+    }
+
     fn handle_help_command(&mut self, text: &str) -> Option<ChatAction> {
-        let reply = "Commands: /help (this message), /whoami (show connection info), /explain <query> (explain query plan), /analyze <query> (analyze query plan and schemas). \
+        let reply = "Commands: /help (this message), /whoami (show connection info), /explain <query> (explain query plan), /analyze <query> (analyze query plan and schemas), /relkind <schema.relation> (get relation kind). \
                  Anything else is sent to PostgreSQL as SQL.";
         self.messages.push(Message {
             role: Role::User,
@@ -223,6 +250,20 @@ impl ChatScreen {
             Ok(output) => self.messages.push(Message {
                 role: Role::Assistant,
                 content: output,
+            }),
+            Err(err) => self.messages.push(Message {
+                role: Role::Error,
+                content: err,
+            }),
+        }
+    }
+
+    pub fn on_relkind_result(&mut self, result: Result<RelKind, String>) {
+        self.busy = false;
+        match result {
+            Ok(rel_kind) => self.messages.push(Message {
+                role: Role::Assistant,
+                content: format!("{rel_kind:?}"),
             }),
             Err(err) => self.messages.push(Message {
                 role: Role::Error,

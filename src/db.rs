@@ -7,13 +7,13 @@
 //! certificate/key pair is always optional and, when configured, is
 //! presented for mutual TLS regardless of mode (as long as TLS is in use).
 
-use std::collections::HashMap;
+use std::{collections::HashMap, str::FromStr};
 
 use openssl::ssl::{SslFiletype, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use strum::{AsRefStr, Display};
+use strum::{AsRefStr, Display, EnumString};
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 
 use crate::config::Connection;
@@ -38,6 +38,10 @@ pub enum DbError {
     Connect(#[from] tokio_postgres::Error),
     #[error("JSON deserialization failed: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("Unkwnown Rel Kind: {0}")]
+    UnknownRelKind(String),
+    #[error("Query returned no data")]
+    NoData,
 }
 
 #[derive(AsRefStr, Debug, Clone, Copy, Display, PartialEq, Eq)]
@@ -47,6 +51,30 @@ pub enum ExplainFormat {
     Xml,
     Json,
     Yaml,
+}
+
+#[derive(AsRefStr, EnumString, Debug, Clone, Copy, Display, PartialEq, Eq)]
+pub enum RelKind {
+    #[strum(to_string="r")]
+    Table,
+    #[strum(to_string="i")]
+    Index,
+    #[strum(to_string="S")]
+    Sequence,
+    #[strum(to_string="t")]
+    ToastTable,
+    #[strum(to_string="v")]
+    View,
+    #[strum(to_string="m")]
+    MaterializedView,
+    #[strum(to_string="c")]
+    CompositeType,
+    #[strum(to_string="f")]
+    ForeignTable,
+    #[strum(to_string="p")]
+    PartitionedTable,
+    #[strum(to_string="I")]
+    PartitionedIndex
 }
 
 /// Connect to PostgreSQL, applying TLS according to `conn.sslmode`.
@@ -397,6 +425,33 @@ pub async fn get_table_schema(
         .collect();
 
     Ok(columns)
+}
+
+const REL_KIND_QUERY: &str = r#"
+SELECT n.nspname, c.relname, relkind
+FROM pg_catalog.pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = $1 AND c.relname = $2;
+"#;
+
+pub async fn get_relation_kind(
+    client: &Client,
+    schema_name: &str,
+    relation_name: &str
+) -> Result<RelKind, DbError> {
+    let rows = client
+        .query(REL_KIND_QUERY, &[&schema_name, &relation_name])
+        .await?;
+
+    let rel_kind = rows.first()
+        .map(|v| {
+            let ch: i8 = v.get("relkind");
+            let s = (ch as u8 as char).to_string();
+            (s.clone(), RelKind::from_str(&s))
+        })
+        .map(|v| v.1.map_err(|_| DbError::UnknownRelKind(v.0)));
+
+    rel_kind.unwrap_or(Err(DbError::NoData))
 }
 
 #[cfg(test)]

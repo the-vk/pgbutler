@@ -11,7 +11,7 @@ use tokio_postgres::Client;
 
 use crate::agent;
 use crate::config::Connection;
-use crate::db::{self, QueryOutcome};
+use crate::db::{self, QueryOutcome, RelKind};
 use crate::ui::chat::{ChatAction, ChatScreen};
 use crate::ui::setup::SetupScreen;
 
@@ -31,6 +31,7 @@ pub enum AppEvent {
     QueryResult(Result<QueryOutcome, String>),
     ExplainResult(Result<String, String>),
     AnalyzeResult(Result<String, String>),
+    RelKindResult(Result<RelKind, String>),
 }
 
 pub struct App {
@@ -126,6 +127,9 @@ impl App {
                             ChatAction::Query(sql) => self.spawn_query(sql),
                             ChatAction::Explain(sql) => self.spawn_explain(sql),
                             ChatAction::Analyze(sql) => self.spawn_analyze(sql),
+                            ChatAction::RelKind(schema, relation) => {
+                                self.spawn_relkind(schema, relation)
+                            }
                         }
                     }
                 }
@@ -160,6 +164,11 @@ impl App {
             AppEvent::AnalyzeResult(result) => {
                 if let Screen::Chat(chat) = &mut self.screen {
                     chat.on_analyze_result(result);
+                }
+            }
+            AppEvent::RelKindResult(result) => {
+                if let Screen::Chat(chat) = &mut self.screen {
+                    chat.on_relkind_result(result);
                 }
             }
         }
@@ -211,6 +220,19 @@ impl App {
                     .await
                     .map_err(|e| e.to_string());
                 let _ = tx.send(AppEvent::AnalyzeResult(result));
+            });
+        }
+    }
+
+    fn spawn_relkind(&self, schema: String, relation: String) {
+        let tx = self.events_tx.clone();
+        if let Screen::Chat(chat) = &self.screen {
+            let client = Arc::clone(&chat.client);
+            tokio::spawn(async move {
+                let result = db::get_relation_kind(&client, &schema, &relation)
+                    .await
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(AppEvent::RelKindResult(result));
             });
         }
     }
