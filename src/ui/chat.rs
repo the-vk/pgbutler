@@ -90,7 +90,9 @@ impl ChatScreen {
         if self.models.is_empty() {
             return;
         }
-        let next = self.selected_model.map_or(0, |i| (i + 1) % self.models.len());
+        let next = self
+            .selected_model
+            .map_or(0, |i| (i + 1) % self.models.len());
         self.selected_model = Some(next);
     }
 
