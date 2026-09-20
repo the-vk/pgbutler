@@ -176,10 +176,20 @@ where
     String::from_utf8(plaintext).map_err(D::Error::custom)
 }
 
+/// Root directory for app files
+pub fn app_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".pgbutler")
+}
+
+pub fn log_dir() -> PathBuf {
+    app_dir().join("logs")
+}
+
 /// Root directory holding connection profiles: `~/.pgbutler/connections`.
 pub fn connections_dir() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".pgbutler").join("connections")
+    app_dir().join("connections")
 }
 
 /// List all connection profiles found on disk, sorted by name.
