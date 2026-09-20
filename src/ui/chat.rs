@@ -44,6 +44,10 @@ pub struct ChatScreen {
     pub input: String,
     pub busy: bool,
     scroll: u16,
+    /// Models reported by the local Ollama daemon, fetched on screen start.
+    pub models: Vec<String>,
+    /// Index into `models` of the model currently in use, if any are available.
+    pub selected_model: Option<usize>,
 }
 
 impl ChatScreen {
@@ -63,12 +67,40 @@ impl ChatScreen {
             input: String::new(),
             busy: false,
             scroll: 0,
+            models: Vec::new(),
+            selected_model: None,
         }
+    }
+
+    /// The model currently selected for AI-assisted commands, if any.
+    pub fn current_model(&self) -> Option<&str> {
+        self.selected_model
+            .and_then(|i| self.models.get(i))
+            .map(String::as_str)
+    }
+
+    /// Store the models available from Ollama and select the first one.
+    pub fn on_models_result(&mut self, models: Vec<String>) {
+        self.selected_model = if models.is_empty() { None } else { Some(0) };
+        self.models = models;
+    }
+
+    /// Cycle to the next available model, wrapping around.
+    fn cycle_model(&mut self) {
+        if self.models.is_empty() {
+            return;
+        }
+        let next = self.selected_model.map_or(0, |i| (i + 1) % self.models.len());
+        self.selected_model = Some(next);
     }
 
     /// Handle a key press. Returns `Some(action)` when a query or command should
     /// be executed against the database.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<ChatAction> {
+        if key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.cycle_model();
+            return None;
+        }
         if self.busy {
             return None;
         }
@@ -285,12 +317,13 @@ impl ChatScreen {
             ])
             .split(area);
 
+        let model_label = self.current_model().unwrap_or("<no models available>");
         draw_banner(
             frame,
             chunks[0],
             &format!(
-                "{} — {}@{}",
-                self.conn.name, self.conn.login, self.conn.host
+                "{} — {}@{} — model: {} (Ctrl+m to switch)",
+                self.conn.name, self.conn.login, self.conn.host, model_label
             ),
         );
 

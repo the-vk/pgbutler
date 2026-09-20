@@ -4,9 +4,9 @@
 
 use std::sync::Arc;
 
-use rig::client::AgentClientExt;
+use rig::client::{AgentClientExt, ModelLister};
 use rig::completion::Prompt;
-use rig::providers::ollama;
+use rig::providers::ollama::{self, OllamaModelLister};
 use rig::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -170,6 +170,27 @@ pub enum AgentError {
     Db(#[from] crate::db::DbError),
     #[error("Agent prompt error: {0}")]
     Prompt(#[from] rig::completion::PromptError),
+    #[error("Failed to list Ollama models: {0}")]
+    ModelListing(String),
+}
+
+/// Query the local Ollama daemon for the set of installed models.
+pub async fn list_ollama_models(base_url: Option<&str>) -> Result<Vec<String>, AgentError> {
+    let url = base_url.unwrap_or(DEFAULT_OLLAMA_URL);
+
+    let ollama_client = ollama::Client::builder()
+        .api_key(rig::client::Nothing)
+        .base_url(url)
+        .build()
+        .map_err(|e| AgentError::ClientInit(e.to_string()))?;
+
+    let lister = OllamaModelLister::new(ollama_client);
+    let models = lister
+        .list_all()
+        .await
+        .map_err(|e| AgentError::ModelListing(e.to_string()))?;
+
+    Ok(models.iter().map(|m| m.id.clone()).collect())
 }
 
 /// Build a configured query analyzer agent using local Ollama.

@@ -32,6 +32,7 @@ pub enum AppEvent {
     ExplainResult(Result<String, String>),
     AnalyzeResult(Result<String, String>),
     RelKindResult(Result<RelKind, String>),
+    ModelsResult(Result<Vec<String>, String>),
 }
 
 pub struct App {
@@ -146,6 +147,7 @@ impl App {
                         Ok(client) => {
                             let _ = crate::config::save_connection(&conn);
                             self.screen = Screen::Chat(ChatScreen::new(*conn, client));
+                            self.spawn_fetch_models();
                         }
                         Err(err) => setup.error = Some(err),
                     }
@@ -169,6 +171,11 @@ impl App {
             AppEvent::RelKindResult(result) => {
                 if let Screen::Chat(chat) = &mut self.screen {
                     chat.on_relkind_result(result);
+                }
+            }
+            AppEvent::ModelsResult(result) => {
+                if let Screen::Chat(chat) = &mut self.screen {
+                    chat.on_models_result(result.unwrap_or_default());
                 }
             }
         }
@@ -215,8 +222,9 @@ impl App {
         let tx = self.events_tx.clone();
         if let Screen::Chat(chat) = &self.screen {
             let client = Arc::clone(&chat.client);
+            let model = chat.current_model().map(str::to_owned);
             tokio::spawn(async move {
-                let result = agent::analyze_query(client, &sql, None, None)
+                let result = agent::analyze_query(client, &sql, model.as_deref(), None)
                     .await
                     .map_err(|e| e.to_string());
                 let _ = tx.send(AppEvent::AnalyzeResult(result));
@@ -235,6 +243,16 @@ impl App {
                 let _ = tx.send(AppEvent::RelKindResult(result));
             });
         }
+    }
+
+    fn spawn_fetch_models(&self) {
+        let tx = self.events_tx.clone();
+        tokio::spawn(async move {
+            let result = agent::list_ollama_models(None)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppEvent::ModelsResult(result));
+        });
     }
 }
 
