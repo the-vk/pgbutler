@@ -55,26 +55,26 @@ pub enum ExplainFormat {
 
 #[derive(AsRefStr, EnumString, Debug, Clone, Copy, Display, PartialEq, Eq)]
 pub enum RelKind {
-    #[strum(to_string="r")]
+    #[strum(to_string = "r")]
     Table,
-    #[strum(to_string="i")]
+    #[strum(to_string = "i")]
     Index,
-    #[strum(to_string="S")]
+    #[strum(to_string = "S")]
     Sequence,
-    #[strum(to_string="t")]
+    #[strum(to_string = "t")]
     ToastTable,
-    #[strum(to_string="v")]
+    #[strum(to_string = "v")]
     View,
-    #[strum(to_string="m")]
+    #[strum(to_string = "m")]
     MaterializedView,
-    #[strum(to_string="c")]
+    #[strum(to_string = "c")]
     CompositeType,
-    #[strum(to_string="f")]
+    #[strum(to_string = "f")]
     ForeignTable,
-    #[strum(to_string="p")]
+    #[strum(to_string = "p")]
     PartitionedTable,
-    #[strum(to_string="I")]
-    PartitionedIndex
+    #[strum(to_string = "I")]
+    PartitionedIndex,
 }
 
 /// Connect to PostgreSQL, applying TLS according to `conn.sslmode`.
@@ -437,13 +437,14 @@ WHERE n.nspname = $1 AND c.relname = $2;
 pub async fn get_relation_kind(
     client: &Client,
     schema_name: &str,
-    relation_name: &str
+    relation_name: &str,
 ) -> Result<RelKind, DbError> {
     let rows = client
         .query(REL_KIND_QUERY, &[&schema_name, &relation_name])
         .await?;
 
-    let rel_kind = rows.first()
+    let rel_kind = rows
+        .first()
         .map(|v| {
             let ch: i8 = v.get("relkind");
             let s = (ch as u8 as char).to_string();
