@@ -126,3 +126,121 @@ impl Tool for GetTableSchemaTool {
         Ok(output)
     }
 }
+
+
+/// Arguments for `GetRelKindTool`.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RelKindArgs {
+    #[serde(default = "default_schema")]
+    pub schema_name: Option<String>,
+    pub rel_name: String,
+}
+
+/// Tool to get a relation kind.
+#[derive(Clone)]
+pub struct GetRelKindTool {
+    client: Arc<Client>,
+}
+
+impl GetRelKindTool {
+    pub fn new(client: Arc<Client>) -> Self {
+        Self { client }
+    }
+}
+
+impl Tool for GetRelKindTool {
+    const NAME: &'static str = "get_rel_kind";
+    type Args = TableSchemaArgs;
+    type Output = String;
+    type Error = ToolError;
+
+    fn description(&self) -> String {
+        "Retrieve type of a specific PostgreSQL relation (table, index, view, materialzed view, etc.).".to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "schema_name": {
+                    "type": "string",
+                    "description": "Schema name (defaults to 'public')"
+                },
+                "rel_name": {
+                    "type": "string",
+                    "description": "Relation name to inspect"
+                }
+            },
+            "required": ["rel_name"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _ctx: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
+        let schema = args.schema_name.as_deref().unwrap_or("public");
+        let rel_kind = crate::db::get_relation_kind(&self.client, schema, &args.table_name).await?;
+        let output = rel_kind.to_string();
+        Ok(output)
+    }
+}
+
+/// Arguments for `GetViewDefTool`.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ViewDefArgs {
+    #[serde(default = "default_schema")]
+    pub schema_name: Option<String>,
+    pub rel_name: String,
+}
+
+/// Tool to get view definition.
+#[derive(Clone)]
+pub struct GetViewDefTool {
+    client: Arc<Client>,
+}
+
+impl GetViewDefTool {
+    pub fn new(client: Arc<Client>) -> Self {
+        Self { client }
+    }
+}
+
+impl Tool for GetViewDefTool {
+    const NAME: &'static str = "get_view_def";
+    type Args = TableSchemaArgs;
+    type Output = String;
+    type Error = ToolError;
+
+    fn description(&self) -> String {
+        "Retrieve a defintion of specific database view.".to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "schema_name": {
+                    "type": "string",
+                    "description": "Schema name (defaults to 'public')"
+                },
+                "rel_name": {
+                    "type": "string",
+                    "description": "Relation name to inspect"
+                }
+            },
+            "required": ["rel_name"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _ctx: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
+        let schema = args.schema_name.as_deref().unwrap_or("public");
+        let output = crate::db::get_view_def(&self.client, schema, &args.table_name).await?;
+        Ok(output)
+    }
+}

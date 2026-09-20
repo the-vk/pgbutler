@@ -455,6 +455,23 @@ pub async fn get_relation_kind(
     rel_kind.unwrap_or(Err(DbError::NoData))
 }
 
+const GET_VIEW_DEF_QUERY: &str = "SELECT pg_get_viewdef($1) as view_def;";
+
+pub async fn get_view_def(
+    client: &Client,
+    schema_name: &str,
+    relation_name: &str,
+) -> Result<String, DbError> {
+    let rows = client
+        .query(GET_VIEW_DEF_QUERY, &[&format!("{schema_name}.{relation_name}")])
+        .await?;
+
+    rows
+        .first()
+        .map(|v| Ok(v.get("view_def")))
+        .unwrap_or(Err(DbError::NoData))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

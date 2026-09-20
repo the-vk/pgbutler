@@ -11,7 +11,7 @@ use rig::completion::Prompt;
 use rig::providers::ollama::{self, OllamaModelLister};
 use tokio_postgres::Client;
 
-use crate::agent::tools::{GetQueryPlanTool, GetTableSchemaTool};
+use crate::agent::tools::{GetQueryPlanTool, GetTableSchemaTool, GetRelKindTool, GetViewDefTool};
 
 /// Default Ollama base URL for local execution.
 pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
@@ -26,9 +26,14 @@ pub const ANALYZER_PREAMBLE: &str = r#"You are an expert PostgreSQL database per
 Your task is to analyze PostgreSQL queries, diagnose performance bottlenecks, and provide actionable recommendations for optimization.
 
 Workflow:
-1. Examine the query execution plan to identify the most time-consuming and costly operations (e.g. Sequential Scans on large tables, expensive Nested Loops, Hash Joins, Spills to disk, Sort operations, or high startup/total costs).
-2. Use the available database schema tools to inspect table definitions, columns, data types, and nullability for all involved tables.
-3. Provide a structured and thorough response that includes:
+1. Analyze the query text and understand names of the relations the query uses. Relations could be optionally qualified with schema name. If not, presume default schema `public`
+1.a. For each relation call the tool `get_rel_kind` to understand the relation kind
+1.b. If relation is a view, call the tool `get_view_def` to get definition of the view
+1.c. Recursively continue the step 1 for each view until you have the full picture of query text.
+1.d. Explain list of tables the query scans with list of views where the tables are used.
+2. Examine the query execution plan to identify the most time-consuming and costly operations (e.g. Sequential Scans on large tables, expensive Nested Loops, Hash Joins, Spills to disk, Sort operations, or high startup/total costs).
+3. Use the available database schema tools to inspect table definitions, columns, data types, and nullability for all involved tables.
+4. Provide a structured and thorough response that includes:
    - Root Cause Analysis: Explanation of why the query is slow or inefficient based on the plan operations and costs.
    - Indexing Recommendations: Concrete `CREATE INDEX` statements with explanations of why specific columns and column orderings were chosen.
    - Query Rewrites: Optimized alternative SQL query formulations (e.g., rewriting correlated subqueries, using CTEs, optimizing JOINs, pushing down filters) with explanations of why the alternative is better.
@@ -90,13 +95,18 @@ pub fn build_analyzer_agent(
         .map_err(|e| AgentError::ClientInit(e.to_string()))?;
 
     let plan_tool = GetQueryPlanTool::new(Arc::clone(&client));
-    let schema_tool = GetTableSchemaTool::new(client);
+    let schema_tool = GetTableSchemaTool::new(Arc::clone(&client));
+    let get_rel_kind_tool = GetRelKindTool::new(Arc::clone(&client));
+    let get_view_def_tool = GetViewDefTool::new(Arc::clone(&client));
+
 
     let agent = ollama_client
         .agent(model)
         .preamble(ANALYZER_PREAMBLE)
         .tool(plan_tool)
         .tool(schema_tool)
+        .tool(get_rel_kind_tool)
+        .tool(get_view_def_tool)
         .default_max_turns(DEFAULT_MAX_TURNS)
         .build();
 
