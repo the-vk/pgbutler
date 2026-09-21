@@ -16,6 +16,10 @@ mod sslmode;
 pub use keyring::{read_master_key, write_master_key};
 pub use sslmode::SslMode;
 
+pub fn default_schema() -> Option<String> {
+    Some("public".to_string())
+}
+
 /// A single PostgreSQL connection profile, persisted to disk as TOML.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Connection {
