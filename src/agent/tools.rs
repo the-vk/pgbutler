@@ -54,12 +54,16 @@ impl Tool for GetQueryPlanTool {
         _ctx: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
+        log::info!(sql = args.query; "Running the tool 'get_query_plan'");
         let plan_json = crate::db::explain(
             &self.client,
             &args.query,
             Some(crate::db::ExplainFormat::Json),
         )
         .await?;
+        
+        log::debug!(execution_plan = plan_json; "Execution plan is ready.");
+        log::info!("The tool 'get_query_plan' finished.");
         Ok(plan_json)
     }
 }
@@ -120,9 +124,12 @@ impl Tool for GetTableSchemaTool {
         _ctx: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
+        log::info!(tool = "get_table_schema", schema = args.schema_name, table = args.table_name; "Running the tool 'get_table_schema'");
         let schema = args.schema_name.as_deref().unwrap_or("public");
         let columns = crate::db::get_table_schema(&self.client, schema, &args.table_name).await?;
         let output = serde_json::to_string_pretty(&columns)?;
+        log::debug!(table_schema = output; "Table schema is ready");
+        log::info!(tool = "get_table_schema"; "The tool 'get_table_schema' finished");
         Ok(output)
     }
 }
@@ -180,9 +187,12 @@ impl Tool for GetRelKindTool {
         _ctx: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
+        log::info!(tool = "get_rel_kind", schema_name = args.schema_name, rel_name = args.table_name; "Running the tool 'get_rel_kind'");
         let schema = args.schema_name.as_deref().unwrap_or("public");
         let rel_kind = crate::db::get_relation_kind(&self.client, schema, &args.table_name).await?;
         let output = rel_kind.to_string();
+        log::debug!(tool = "get_rel_kind", rel_kind = output; "Relation kind is ready");
+        log::info!(tool = "get_rel_kind"; "The tool 'get_rel_kind' finished");
         Ok(output)
     }
 }
@@ -239,8 +249,11 @@ impl Tool for GetViewDefTool {
         _ctx: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
+        log::info!(tool = "get_view_def"; "Running the tool 'get_view_def'");
         let schema = args.schema_name.as_deref().unwrap_or("public");
         let output = crate::db::get_view_def(&self.client, schema, &args.table_name).await?;
+        log::debug!(tool = "get_view_def", view_def = output; "The view definition is ready");
+        log::info!(tool = "get_view_def"; "The tool 'get_view_def' finished");
         Ok(output)
     }
 }
