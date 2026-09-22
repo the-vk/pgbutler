@@ -24,12 +24,15 @@ async fn main() -> color_eyre::Result<()> {
         .dispatch(|d| d.filter(LevelFilter::MoreSevereEqual(Level::Debug)).append(log_file))
         .apply();
 
-    log::info!("Starting pgbutler");
+    log::info!("Starting pgbutler...");
 
     color_eyre::install()?;
 
     let terminal = ratatui::init();
     let result = App::new().run(terminal).await;
     ratatui::restore();
+
+    log::info!("Existing pgbutler");
+
     result
 }
