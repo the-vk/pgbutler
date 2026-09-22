@@ -8,7 +8,7 @@ mod ui;
 
 use app::App;
 use chrono::Local;
-use logforth::{append::file::FileBuilder, layout::TextLayout, record::LevelFilter};
+use logforth::{append::file::FileBuilder, layout::TextLayout, record::{Level, LevelFilter}};
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
@@ -21,7 +21,7 @@ async fn main() -> color_eyre::Result<()> {
         .unwrap();
 
     logforth::starter_log::builder()
-        .dispatch(|d| d.filter(LevelFilter::All).append(log_file))
+        .dispatch(|d| d.filter(LevelFilter::MoreSevereEqual(Level::Debug)).append(log_file))
         .apply();
 
     log::info!("Starting pgbutler");
