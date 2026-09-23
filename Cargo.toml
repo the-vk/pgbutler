@@ -1,6 +1,16 @@
 [package]
 name = "pgbutler"
 version = "0.1.0"
+authors = ["Andrew Maraev <the_vk@thevk.net"]
+description = """
+pgbutler is an AI tool to analyze your PostgreSQL instance and provide helpful
+recommendations.
+"""
+documentation = "https://github.com/the-vk/pgbutler"
+homepage = "https://github.com/the-vk/pgbutler"
+repository = "https://github.com/the-vk/pgbutler"
+keywords = ["postgres", "postgresql", "ollama"]
+license = "GPL-3.0"
 edition = "2024"
 
 [dependencies]
