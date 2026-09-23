@@ -129,9 +129,18 @@ pub async fn analyze_query(
         "Please analyze the following SQL query and its execution plan:\n\n\
         SQL Query:\n```sql\n{sql}\n```\n\n\
         Execution Plan (JSON):\n```json\n{plan_json}\n```\n\n\
+        Interrogate the query and discover names of the relations the query is reading data from. Relations may be 
+        qualified with a schema name. If not, then use default schema `public`.\n
+        You can also use the `get_rel_kind` tool to understand kind of the mentioned relations - table, view, etc.\n
+        If you discover a view, then use the tool `get_view_def` to get view definition and repeat the relation
+        discovery step again.\n
         You can use the `get_table_schema` tool to inspect table schemas and column details as needed, \
         or `get_query_plan` if you want to inspect alternative query plans.\n\
-        Please provide a detailed performance analysis with root cause, recommended indexes, and query rewrites."
+        Please provide a detailed performance analysis with root cause, recommended indexes on table relations
+        or materialized views, and query rewrites. Consider view definition changes if that could help.
+        
+        If possible, also do estimations on potential performance improvements with the proposed changes. Consider how
+        the changes would impact CPU time on executing the query, impact on I/O time spent on reading blocks from files."
     );
 
     let response = agent.prompt(&prompt).await?;
