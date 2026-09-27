@@ -1,0 +1,172 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version to release, without the leading v
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate version
+        id: version
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if previous_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>&1)"; then
+            previous_version="${previous_tag#v}"
+          elif [[ "$previous_tag" == *"HTTP 404"* ]]; then
+            echo "No previous release found; skipping version precedence check."
+            previous_tag=""
+            previous_version=""
+          else
+            printf '%s\n' "$previous_tag" >&2
+            exit 1
+          fi
+
+          python3 - "$VERSION" "$previous_version" <<'PY'
+          import re
+          import sys
+
+          version_pattern = re.compile(
+              r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+              r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+              r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+          )
+
+          def parse(version):
+              match = version_pattern.fullmatch(version)
+              if match is None:
+                  raise ValueError(f"{version!r} is not a valid semantic version")
+              major, minor, patch, prerelease, _ = match.groups()
+              identifiers = prerelease.split(".") if prerelease else None
+              if identifiers and any(
+                  identifier.isdigit() and len(identifier) > 1 and identifier.startswith("0")
+                  for identifier in identifiers
+              ):
+                  raise ValueError(f"{version!r} has a numeric prerelease identifier with a leading zero")
+              return (int(major), int(minor), int(patch)), identifiers
+
+          def compare(left, right):
+              left_core, left_pre = parse(left)
+              right_core, right_pre = parse(right)
+              if left_core != right_core:
+                  return (left_core > right_core) - (left_core < right_core)
+              if left_pre is None or right_pre is None:
+                  return (left_pre is None) - (right_pre is None)
+              for left_id, right_id in zip(left_pre, right_pre):
+                  if left_id == right_id:
+                      continue
+                  left_numeric = left_id.isdigit()
+                  right_numeric = right_id.isdigit()
+                  if left_numeric and right_numeric:
+                      return (int(left_id) > int(right_id)) - (int(left_id) < int(right_id))
+                  if left_numeric != right_numeric:
+                      return -1 if left_numeric else 1
+                  return (left_id > right_id) - (left_id < right_id)
+              return (len(left_pre) > len(right_pre)) - (len(left_pre) < len(right_pre))
+
+          try:
+              parse(sys.argv[1])
+              if sys.argv[2] and compare(sys.argv[1], sys.argv[2]) <= 0:
+                  raise ValueError(f"{sys.argv[1]} must be later than the latest release {sys.argv[2]}")
+          except ValueError as error:
+              print(error, file=sys.stderr)
+              sys.exit(1)
+          PY
+
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=${previous_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests
+        run: cargo test --verbose
+
+      - name: Update version and commit
+        env:
+          VERSION: ${{ inputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 - "$VERSION" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          cargo_toml = Path("Cargo.toml")
+          content = cargo_toml.read_text()
+          updated, replacements = re.subn(
+              r'(?m)^(version\s*=\s*)"[^"]+"$',
+              lambda match: f'{match.group(1)}"{sys.argv[1]}"',
+              content,
+              count=1,
+          )
+          if replacements != 1:
+              raise SystemExit("Could not identify the package version in Cargo.toml")
+          cargo_toml.write_text(updated)
+          PY
+          cargo update --workspace
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: release ${TAG}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Build release binary
+        run: cargo build --release --locked --verbose
+
+      - name: Prepare release notes
+        env:
+          PREVIOUS_TAG: ${{ steps.version.outputs.previous_tag }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            git log --pretty=format:'- %s' "${PREVIOUS_TAG}..${GITHUB_SHA}" > release-notes.md
+          else
+            git log --pretty=format:'- %s' "$GITHUB_SHA" > release-notes.md
+          fi
+          if [[ ! -s release-notes.md ]]; then
+            if [[ -n "$PREVIOUS_TAG" ]]; then
+              printf 'No commits since %s.\n' "$PREVIOUS_TAG" > release-notes.md
+            else
+              printf 'Initial release.\n' > release-notes.md
+            fi
+          fi
+
+      - name: Tag release
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+      - name: Archive binary
+        env:
+          VERSION: ${{ inputs.version }}
+        run: tar -czf "pgbutler-v${VERSION}.tar.gz" -C target/release pgbutler
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ inputs.version }}
+        run: gh release create "$TAG" "pgbutler-v${VERSION}.tar.gz" --title "pgbutler $TAG" --notes-file release-notes.md
