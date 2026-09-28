@@ -20,6 +20,38 @@ struct KeyboardEnhancementGuard {
     enabled: bool,
 }
 
+struct BracketedPasteGuard {
+    enabled: bool,
+}
+
+impl BracketedPasteGuard {
+    fn enable() -> Self {
+        use crossterm::event::EnableBracketedPaste;
+
+        let enabled = match crossterm::execute!(stdout(), EnableBracketedPaste) {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("Could not enable bracketed paste: {error}");
+                false
+            }
+        };
+
+        Self { enabled }
+    }
+}
+
+impl Drop for BracketedPasteGuard {
+    fn drop(&mut self) {
+        if self.enabled {
+            use crossterm::event::DisableBracketedPaste;
+
+            if let Err(error) = crossterm::execute!(stdout(), DisableBracketedPaste) {
+                log::warn!("Could not disable bracketed paste: {error}");
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 impl KeyboardEnhancementGuard {
     fn enable_if_supported() -> Self {
@@ -96,9 +128,11 @@ async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
     let terminal = ratatui::init();
+    let bracketed_paste = BracketedPasteGuard::enable();
     let keyboard_enhancement = KeyboardEnhancementGuard::enable_if_supported();
     let result = App::new().run(terminal).await;
     drop(keyboard_enhancement);
+    drop(bracketed_paste);
     ratatui::restore();
 
     log::info!("Existing pgbutler");

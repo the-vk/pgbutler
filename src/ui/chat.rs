@@ -153,12 +153,9 @@ impl ChatScreen {
                     self.input_cursor += 1;
                     return None;
                 }
-                let text = self.input.trim().to_string();
-                self.input.clear();
-                self.input_cursor = 0;
-                if text.is_empty() {
+                let Some(text) = take_query(&mut self.input, &mut self.input_cursor) else {
                     return None;
-                }
+                };
                 if let Some(action) = self.parse_chat_command(&text) {
                     self.busy = true;
                     return Some(action);
@@ -167,6 +164,13 @@ impl ChatScreen {
             _ => {}
         }
         None
+    }
+
+    pub fn handle_paste(&mut self, text: &str) {
+        if self.busy {
+            return;
+        }
+        insert_at_cursor(&mut self.input, &mut self.input_cursor, text);
     }
 
     fn parse_chat_command(&mut self, text: &str) -> Option<ChatAction> {
@@ -355,7 +359,8 @@ impl ChatScreen {
         let area = frame.area();
         frame.render_widget(Block::default().style(Style::default().bg(theme::BG)), area);
 
-        let query_line_count = self.input.split('\n').count() as u16;
+        let input_line_ranges = line_ranges(&self.input);
+        let query_line_count = input_line_ranges.len() as u16;
         let max_query_lines = area.height.saturating_sub(7).max(1);
         let input_height = query_line_count.min(max_query_lines) + 2;
         let chunks = Layout::default()
@@ -406,21 +411,24 @@ impl ChatScreen {
             .border_style(Style::default().fg(theme::ACCENT_DIM))
             .title(input_title)
             .title_style(Style::default().fg(theme::ACCENT));
-        let cursor_line = self.input[..self.input_cursor]
-            .bytes()
-            .filter(|byte| *byte == b'\n')
-            .count();
-        let mut line_start = 0;
-        let input_lines: Vec<Line> = self
-            .input
-            .split('\n')
+        let cursor_line = input_line_ranges
+            .iter()
+            .position(|(_, line_end, break_end)| {
+                self.input_cursor <= *line_end
+                    || (self.input_cursor > *line_end && self.input_cursor < *break_end)
+            })
+            .unwrap_or(input_line_ranges.len() - 1);
+        let input_lines: Vec<Line> = input_line_ranges
+            .iter()
             .enumerate()
-            .map(|(line_index, text)| {
-                let line_end = line_start + text.len();
+            .map(|(line_index, (line_start, line_end, _))| {
+                let text = &self.input[*line_start..*line_end];
                 let cursor_on_line = line_index == cursor_line;
-                let cursor_offset = self.input_cursor.saturating_sub(line_start).min(text.len());
+                let cursor_offset = self
+                    .input_cursor
+                    .saturating_sub(*line_start)
+                    .min(text.len());
                 let prefix = if line_index == 0 { "> " } else { "  " };
-                line_start = line_end + 1;
                 let mut spans = vec![Span::styled(prefix, Style::default().fg(theme::ACCENT))];
 
                 if cursor_on_line {
@@ -474,11 +482,89 @@ fn previous_char_boundary(text: &str, cursor: usize) -> usize {
         .map_or(0, |(index, _)| index)
 }
 
+fn insert_at_cursor(input: &mut String, cursor: &mut usize, text: &str) {
+    input.insert_str(*cursor, text);
+    *cursor += text.len();
+}
+
+fn line_ranges(input: &str) -> Vec<(usize, usize, usize)> {
+    let bytes = input.as_bytes();
+    let mut ranges = Vec::new();
+    let mut line_start = 0;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if matches!(bytes[index], b'\r' | b'\n') {
+            let line_end = index;
+            let is_carriage_return = bytes[index] == b'\r';
+            index += 1;
+            if is_carriage_return && bytes.get(index) == Some(&b'\n') {
+                index += 1;
+            }
+            ranges.push((line_start, line_end, index));
+            line_start = index;
+        } else {
+            index += 1;
+        }
+    }
+
+    ranges.push((line_start, input.len(), input.len()));
+    ranges
+}
+
+fn take_query(input: &mut String, cursor: &mut usize) -> Option<String> {
+    let text = std::mem::take(input);
+    *cursor = 0;
+    (!text.trim().is_empty()).then_some(text)
+}
+
 fn next_char_boundary(text: &str, cursor: usize) -> usize {
     text[cursor..]
         .char_indices()
         .nth(1)
         .map_or(text.len(), |(offset, _)| cursor + offset)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{insert_at_cursor, line_ranges, take_query};
+
+    #[test]
+    fn paste_preserves_cr_and_lf_at_cursor() {
+        let mut input = "SELECT  FROM item".to_string();
+        let mut cursor = "SELECT ".len();
+        let pasted = "*\r\nWHERE id = 1\rAND active\n";
+
+        insert_at_cursor(&mut input, &mut cursor, pasted);
+
+        assert_eq!(input, "SELECT *\r\nWHERE id = 1\rAND active\n FROM item");
+        assert_eq!(cursor, "SELECT ".len() + pasted.len());
+    }
+
+    #[test]
+    fn submission_preserves_trailing_line_endings() {
+        let mut input = "SELECT 1\r\n".to_string();
+        let mut cursor = input.len();
+
+        assert_eq!(
+            take_query(&mut input, &mut cursor),
+            Some("SELECT 1\r\n".to_string())
+        );
+        assert!(input.is_empty());
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn line_ranges_recognize_lf_crlf_and_cr() {
+        let input = "one\r\ntwo\rthree\nfour";
+        let ranges = line_ranges(input);
+        let lines: Vec<&str> = ranges
+            .iter()
+            .map(|(start, end, _)| &input[*start..*end])
+            .collect();
+
+        assert_eq!(lines, ["one", "two", "three", "four"]);
+    }
 }
 
 fn format_outcome(outcome: &QueryOutcome) -> String {

@@ -107,34 +107,42 @@ impl App {
     }
 
     fn handle_terminal_event(&mut self, event: Event) {
-        if let Event::Key(key) = event {
-            if key.kind != KeyEventKind::Press {
-                return;
-            }
-            if is_quit(&key) {
-                self.should_quit = true;
-                return;
-            }
-            match &mut self.screen {
-                Screen::Setup(setup) => {
-                    if let Some(draft) = setup.handle_key(key) {
-                        setup.connecting = true;
-                        self.spawn_connect(draft);
-                    }
+        match event {
+            Event::Key(key) => {
+                if key.kind != KeyEventKind::Press {
+                    return;
                 }
-                Screen::Chat(chat) => {
-                    if let Some(action) = chat.handle_key(key) {
-                        match action {
-                            ChatAction::Query(sql) => self.spawn_query(sql),
-                            ChatAction::Explain(sql) => self.spawn_explain(sql),
-                            ChatAction::Analyze(sql) => self.spawn_analyze(sql),
-                            ChatAction::RelKind(schema, relation) => {
-                                self.spawn_relkind(schema, relation)
+                if is_quit(&key) {
+                    self.should_quit = true;
+                    return;
+                }
+                match &mut self.screen {
+                    Screen::Setup(setup) => {
+                        if let Some(draft) = setup.handle_key(key) {
+                            setup.connecting = true;
+                            self.spawn_connect(draft);
+                        }
+                    }
+                    Screen::Chat(chat) => {
+                        if let Some(action) = chat.handle_key(key) {
+                            match action {
+                                ChatAction::Query(sql) => self.spawn_query(sql),
+                                ChatAction::Explain(sql) => self.spawn_explain(sql),
+                                ChatAction::Analyze(sql) => self.spawn_analyze(sql),
+                                ChatAction::RelKind(schema, relation) => {
+                                    self.spawn_relkind(schema, relation)
+                                }
                             }
                         }
                     }
                 }
             }
+            Event::Paste(text) => {
+                if let Screen::Chat(chat) = &mut self.screen {
+                    chat.handle_paste(&text);
+                }
+            }
+            _ => {}
         }
     }
 
