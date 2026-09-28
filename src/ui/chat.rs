@@ -43,6 +43,7 @@ pub struct ChatScreen {
     pub client: Arc<Client>,
     pub messages: Vec<Message>,
     pub input: String,
+    input_cursor: usize,
     pub busy: bool,
     usage_summary: Option<String>,
     scroll: u16,
@@ -67,6 +68,7 @@ impl ChatScreen {
             client: Arc::new(client),
             messages,
             input: String::new(),
+            input_cursor: 0,
             busy: false,
             usage_summary: None,
             scroll: 0,
@@ -111,16 +113,49 @@ impl ChatScreen {
         }
         match key.code {
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.input.push(c);
+                self.input.insert(self.input_cursor, c);
+                self.input_cursor += c.len_utf8();
             }
             KeyCode::Backspace => {
-                self.input.pop();
+                if self.input_cursor > 0 {
+                    let previous = previous_char_boundary(&self.input, self.input_cursor);
+                    self.input.drain(previous..self.input_cursor);
+                    self.input_cursor = previous;
+                }
+            }
+            KeyCode::Delete => {
+                if self.input_cursor < self.input.len() {
+                    let next = next_char_boundary(&self.input, self.input_cursor);
+                    self.input.drain(self.input_cursor..next);
+                }
+            }
+            KeyCode::Left => {
+                self.input_cursor = previous_char_boundary(&self.input, self.input_cursor);
+            }
+            KeyCode::Right => {
+                self.input_cursor = next_char_boundary(&self.input, self.input_cursor);
+            }
+            KeyCode::Home => {
+                self.input_cursor = self.input[..self.input_cursor]
+                    .rfind('\n')
+                    .map_or(0, |index| index + 1);
+            }
+            KeyCode::End => {
+                self.input_cursor = self.input[self.input_cursor..]
+                    .find('\n')
+                    .map_or(self.input.len(), |index| self.input_cursor + index);
             }
             KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
             KeyCode::Down => self.scroll = self.scroll.saturating_add(1),
             KeyCode::Enter => {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.input.insert(self.input_cursor, '\n');
+                    self.input_cursor += 1;
+                    return None;
+                }
                 let text = self.input.trim().to_string();
                 self.input.clear();
+                self.input_cursor = 0;
                 if text.is_empty() {
                     return None;
                 }
@@ -320,12 +355,15 @@ impl ChatScreen {
         let area = frame.area();
         frame.render_widget(Block::default().style(Style::default().bg(theme::BG)), area);
 
+        let query_line_count = self.input.split('\n').count() as u16;
+        let max_query_lines = area.height.saturating_sub(7).max(1);
+        let input_height = query_line_count.min(max_query_lines) + 2;
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(2),
                 Constraint::Min(3),
-                Constraint::Length(3),
+                Constraint::Length(input_height),
             ])
             .split(area);
 
@@ -368,12 +406,40 @@ impl ChatScreen {
             .border_style(Style::default().fg(theme::ACCENT_DIM))
             .title(input_title)
             .title_style(Style::default().fg(theme::ACCENT));
-        let input = Paragraph::new(Line::from(vec![
-            Span::styled("> ", Style::default().fg(theme::ACCENT)),
-            Span::styled(self.input.as_str(), Style::default().fg(theme::TEXT)),
-            Span::styled("▏", Style::default().fg(theme::ACCENT)),
-        ]))
-        .block(input_block);
+        let cursor_line = self.input[..self.input_cursor]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count();
+        let mut line_start = 0;
+        let input_lines: Vec<Line> = self
+            .input
+            .split('\n')
+            .enumerate()
+            .map(|(line_index, text)| {
+                let line_end = line_start + text.len();
+                let cursor_on_line = line_index == cursor_line;
+                let cursor_offset = self.input_cursor.saturating_sub(line_start).min(text.len());
+                let prefix = if line_index == 0 { "> " } else { "  " };
+                line_start = line_end + 1;
+                let mut spans = vec![Span::styled(prefix, Style::default().fg(theme::ACCENT))];
+
+                if cursor_on_line {
+                    spans.push(Span::styled(
+                        &text[..cursor_offset],
+                        Style::default().fg(theme::TEXT),
+                    ));
+                    spans.push(Span::styled("▏", Style::default().fg(theme::ACCENT)));
+                    spans.push(Span::styled(
+                        &text[cursor_offset..],
+                        Style::default().fg(theme::TEXT),
+                    ));
+                } else {
+                    spans.push(Span::styled(text, Style::default().fg(theme::TEXT)));
+                }
+                Line::from(spans)
+            })
+            .collect();
+        let input = Paragraph::new(input_lines).block(input_block);
         frame.render_widget(input, chunks[2]);
 
         self.draw_token_usage(frame, &chunks[2], input_title);
@@ -392,16 +458,27 @@ impl ChatScreen {
                     1,
                 );
                 frame.render_widget(
-                    Paragraph::new(overlay_text).style(
-                        Style::default()
-                            .fg(theme::MUTED)
-                            .bg(theme::BG),
-                    ),
+                    Paragraph::new(overlay_text)
+                        .style(Style::default().fg(theme::MUTED).bg(theme::BG)),
                     overlay,
                 );
             }
         }
     }
+}
+
+fn previous_char_boundary(text: &str, cursor: usize) -> usize {
+    text[..cursor]
+        .char_indices()
+        .next_back()
+        .map_or(0, |(index, _)| index)
+}
+
+fn next_char_boundary(text: &str, cursor: usize) -> usize {
+    text[cursor..]
+        .char_indices()
+        .nth(1)
+        .map_or(text.len(), |(offset, _)| cursor + offset)
 }
 
 fn format_outcome(outcome: &QueryOutcome) -> String {
