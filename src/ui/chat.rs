@@ -6,12 +6,13 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use tokio_postgres::Client;
 
+use crate::agent::Response;
 use crate::config::Connection;
 use crate::db::{QueryOutcome, RelKind};
 use crate::theme;
@@ -43,6 +44,7 @@ pub struct ChatScreen {
     pub messages: Vec<Message>,
     pub input: String,
     pub busy: bool,
+    usage_summary: Option<String>,
     scroll: u16,
     /// Models reported by the local Ollama daemon, fetched on screen start.
     pub models: Vec<String>,
@@ -66,6 +68,7 @@ impl ChatScreen {
             messages,
             input: String::new(),
             busy: false,
+            usage_summary: None,
             scroll: 0,
             models: Vec::new(),
             selected_model: None,
@@ -171,6 +174,7 @@ impl ChatScreen {
             role: Role::User,
             content: text.to_owned(),
         });
+        self.usage_summary = None;
         self.busy = true;
         Some(ChatAction::Analyze(query.to_owned()))
     }
@@ -278,13 +282,19 @@ impl ChatScreen {
         }
     }
 
-    pub fn on_analyze_result(&mut self, result: Result<String, String>) {
+    pub fn on_analyze_result(&mut self, result: Result<Response, String>) {
         self.busy = false;
         match result {
-            Ok(output) => self.messages.push(Message {
-                role: Role::Assistant,
-                content: output,
-            }),
+            Ok(response) => {
+                self.usage_summary = Some(format!(
+                    "in: {} out: {} req: {}",
+                    response.input_tokens, response.output_tokens, response.model_requests
+                ));
+                self.messages.push(Message {
+                    role: Role::Assistant,
+                    content: response.answer,
+                });
+            }
             Err(err) => self.messages.push(Message {
                 role: Role::Error,
                 content: err,
@@ -365,6 +375,32 @@ impl ChatScreen {
         ]))
         .block(input_block);
         frame.render_widget(input, chunks[2]);
+
+        self.draw_token_usage(frame, &chunks[2], input_title);
+    }
+
+    fn draw_token_usage(&self, frame: &mut Frame<'_>, render_area: &Rect, input_title: &str) {
+        if let Some(usage) = &self.usage_summary {
+            let overlay_text = format!(" {usage} ");
+            let overlay_width = overlay_text.chars().count() as u16;
+            let required_width = input_title.chars().count() as u16 + overlay_width + 2;
+            if render_area.width >= required_width + 2 {
+                let overlay = Rect::new(
+                    render_area.x + render_area.width - overlay_width - 1,
+                    render_area.y,
+                    overlay_width,
+                    1,
+                );
+                frame.render_widget(
+                    Paragraph::new(overlay_text).style(
+                        Style::default()
+                            .fg(theme::MUTED)
+                            .bg(theme::BG),
+                    ),
+                    overlay,
+                );
+            }
+        }
     }
 }
 

@@ -60,6 +60,14 @@ pub enum AgentError {
     ModelListing(String),
 }
 
+#[derive(Debug)]
+pub struct Response {
+    pub answer: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub model_requests: usize,
+}
+
 /// Query the local Ollama daemon for the set of installed models.
 pub async fn list_ollama_models(base_url: Option<&str>) -> Result<Vec<String>, AgentError> {
     let url = base_url.unwrap_or(DEFAULT_OLLAMA_URL);
@@ -119,7 +127,7 @@ pub async fn analyze_query(
     sql: &str,
     model_name: Option<&str>,
     base_url: Option<&str>,
-) -> Result<String, AgentError> {
+) -> Result<Response, AgentError> {
     // Collect the initial execution plan to seed into the user prompt
     let plan_json = crate::db::explain(&client, sql, Some(crate::db::ExplainFormat::Json)).await?;
 
@@ -143,8 +151,13 @@ pub async fn analyze_query(
         the changes would impact CPU time on executing the query, impact on I/O time spent on reading blocks from files."
     );
 
-    let response = agent.prompt(&prompt).await?;
-    Ok(response)
+    let response = agent.prompt(&prompt).extended_details().await?;
+    Ok(Response {
+        answer: response.output,
+        input_tokens: response.usage.input_tokens,
+        output_tokens: response.usage.output_tokens,
+        model_requests: response.completion_calls.len(),
+    })
 }
 
 #[cfg(test)]

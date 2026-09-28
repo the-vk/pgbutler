@@ -30,7 +30,7 @@ pub enum AppEvent {
     },
     QueryResult(Result<QueryOutcome, String>),
     ExplainResult(Result<String, String>),
-    AnalyzeResult(Result<String, String>),
+    AnalyzeResult(Result<agent::Response, String>),
     RelKindResult(Result<RelKind, String>),
     ModelsResult(Result<Vec<String>, String>),
 }
