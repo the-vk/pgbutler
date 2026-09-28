@@ -1,6 +1,6 @@
 [package]
 name = "pgbutler"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Andrew Maraev <the_vk@thevk.net"]
 description = """
 pgbutler is an AI tool to analyze your PostgreSQL instance and provide helpful
