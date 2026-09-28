@@ -24,20 +24,6 @@ pub const DEFAULT_MAX_TURNS: usize = 10;
 /// System prompt / preamble instructing the agent on query analysis and optimization.
 pub const ANALYZER_PREAMBLE: &str = r#"You are an expert PostgreSQL database performance tuning and optimization assistant.
 Your task is to analyze PostgreSQL queries, diagnose performance bottlenecks, and provide actionable recommendations for optimization.
-
-Workflow:
-1. Analyze the query text and understand names of the relations the query uses. Relations could be optionally qualified with schema name. If not, presume default schema `public`
-1.a. For each relation call the tool `get_rel_kind` to understand the relation kind
-1.b. If relation is a view, call the tool `get_view_def` to get definition of the view
-1.c. Recursively continue the step 1 for each view until you have the full picture of query text.
-1.d. Explain list of tables the query scans with list of views where the tables are used.
-2. Examine the query execution plan to identify the most time-consuming and costly operations (e.g. Sequential Scans on large tables, expensive Nested Loops, Hash Joins, Spills to disk, Sort operations, or high startup/total costs).
-3. Use the available database schema tools to inspect table definitions, columns, data types, and nullability for all involved tables.
-4. Provide a structured and thorough response that includes:
-   - Root Cause Analysis: Explanation of why the query is slow or inefficient based on the plan operations and costs.
-   - Indexing Recommendations: Concrete `CREATE INDEX` statements with explanations of why specific columns and column orderings were chosen.
-   - Query Rewrites: Optimized alternative SQL query formulations (e.g., rewriting correlated subqueries, using CTEs, optimizing JOINs, pushing down filters) with explanations of why the alternative is better.
-   - Additional Recommendations: PostgreSQL configuration adjustments (e.g., work_mem, random_page_cost) or maintenance tasks (e.g., VACUUM ANALYZE) if relevant.
 "#;
 
 #[derive(Debug, thiserror::Error)]
@@ -148,7 +134,14 @@ pub async fn analyze_query(
         or materialized views, and query rewrites. Consider view definition changes if that could help.
         
         If possible, also do estimations on potential performance improvements with the proposed changes. Consider how
-        the changes would impact CPU time on executing the query, impact on I/O time spent on reading blocks from files."
+        the changes would impact CPU time on executing the query, impact on I/O time spent on reading blocks from files.
+        
+        Provide a structured and thorough response that includes:
+            - Root Cause Analysis: Explanation of why the query is slow or inefficient based on the plan operations and costs.
+            - Indexing Recommendations: Concrete `CREATE INDEX` statements with explanations of why specific columns and column orderings were chosen.
+            - Query Rewrites: Optimized alternative SQL query formulations (e.g., rewriting correlated subqueries, using CTEs, optimizing JOINs, pushing down filters) with explanations of why the alternative is better.
+            - Additional Recommendations: PostgreSQL configuration adjustments (e.g., work_mem, random_page_cost) or maintenance tasks (e.g., VACUUM ANALYZE) if relevant.
+        "
     );
 
     let response = agent.prompt(&prompt).extended_details().await?;
