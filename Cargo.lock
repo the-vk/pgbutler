@@ -5247,7 +5247,7 @@ dependencies = [
 
 [[package]]
 name = "pgbutler"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "aes-gcm",
  "apple-native-keyring-store",
