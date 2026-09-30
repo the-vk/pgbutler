@@ -14,7 +14,9 @@ use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 use serde_json::json;
 use tokio_postgres::Client;
 
-use crate::agent::tools::{GetQueryPlanTool, GetRelKindTool, GetTableSchemaTool, GetViewDefTool};
+use crate::agent::tools::{
+    GetQueryPlanTool, GetRelKindTool, GetTableIndexesTool, GetTableSchemaTool, GetViewDefTool,
+};
 
 /// Default Ollama base URL for local execution.
 pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
@@ -138,6 +140,7 @@ pub fn build_analyzer_agent(
 
     let plan_tool = GetQueryPlanTool::new(Arc::clone(&client));
     let schema_tool = GetTableSchemaTool::new(Arc::clone(&client));
+    let indexes_tool = GetTableIndexesTool::new(Arc::clone(&client));
     let get_rel_kind_tool = GetRelKindTool::new(Arc::clone(&client));
     let get_view_def_tool = GetViewDefTool::new(Arc::clone(&client));
 
@@ -146,6 +149,7 @@ pub fn build_analyzer_agent(
         .preamble(ANALYZER_PREAMBLE)
         .tool(plan_tool)
         .tool(schema_tool)
+        .tool(indexes_tool)
         .tool(get_rel_kind_tool)
         .tool(get_view_def_tool)
         .default_max_turns(DEFAULT_MAX_TURNS)
@@ -180,8 +184,8 @@ pub async fn analyze_query_streaming(
         You can also use the `get_rel_kind` tool to understand kind of the mentioned relations - table, view, etc.\n
         If you discover a view, then use the tool `get_view_def` to get view definition and repeat the relation
         discovery step again.\n
-        You can use the `get_table_schema` tool to inspect table schemas and column details as needed, \
-        or `get_query_plan` if you want to inspect alternative query plans.\n\
+        You can use `get_table_schema` to inspect table columns, or `get_query_plan` to inspect alternative query plans.\n\
+        Use the tool `get_table_indexes` before suggesting new indexes, do not suggest indexes repeating existing ones.
         Please provide a detailed performance analysis with root cause, recommended indexes on table relations
         or materialized views, and query rewrites. Consider view definition changes if that could help.
         
@@ -229,13 +233,18 @@ pub async fn analyze_query_streaming(
 mod tests {
     use rig::tool::Tool;
 
-    use crate::agent::tools::TableSchemaArgs;
+    use crate::agent::tools::{TableIndexesArgs, TableSchemaArgs};
 
     use super::*;
 
     #[test]
     fn query_plan_tool_metadata() {
         assert_eq!(GetQueryPlanTool::NAME, "get_query_plan");
+    }
+
+    #[test]
+    fn table_indexes_tool_metadata() {
+        assert_eq!(GetTableIndexesTool::NAME, "get_table_indexes");
     }
 
     #[test]
@@ -250,6 +259,19 @@ mod tests {
             serde_json::from_str(json_default).expect("deserialize default");
         assert_eq!(args_default.schema_name.as_deref(), Some("public"));
         assert_eq!(args_default.table_name, "users");
+    }
+
+    #[test]
+    fn table_indexes_args_deserialize() {
+        let json_data = r#"{"schema_name": "sales", "table_name": "orders"}"#;
+        let args: TableIndexesArgs = serde_json::from_str(json_data).expect("deserialize");
+        assert_eq!(args.schema_name.as_deref(), Some("sales"));
+        assert_eq!(args.table_name, "orders");
+
+        let json_default = r#"{"table_name": "orders"}"#;
+        let args_default: TableIndexesArgs =
+            serde_json::from_str(json_default).expect("deserialize default");
+        assert_eq!(args_default.schema_name.as_deref(), Some("public"));
     }
 
     #[test]

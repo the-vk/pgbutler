@@ -436,6 +436,79 @@ pub async fn get_table_schema(
     Ok(columns)
 }
 
+/// Index metadata and usage statistics for a PostgreSQL table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableIndex {
+    pub index_name: String,
+    pub access_method: String,
+    pub is_unique: bool,
+    pub is_primary: bool,
+    pub is_valid: bool,
+    pub is_ready: bool,
+    pub definition: String,
+    pub size_bytes: i64,
+    pub scans: i64,
+    pub tuples_read: i64,
+    pub tuples_fetched: i64,
+}
+
+const TABLE_INDEXES_QUERY: &str = r#"
+SELECT
+    index_class.relname AS index_name,
+    access_method.amname AS access_method,
+    index_info.indisunique AS is_unique,
+    index_info.indisprimary AS is_primary,
+    index_info.indisvalid AS is_valid,
+    index_info.indisready AS is_ready,
+    pg_catalog.pg_get_indexdef(index_info.indexrelid) AS definition,
+    pg_catalog.pg_relation_size(index_info.indexrelid) AS size_bytes,
+    COALESCE(index_stats.idx_scan, 0) AS scans,
+    COALESCE(index_stats.idx_tup_read, 0) AS tuples_read,
+    COALESCE(index_stats.idx_tup_fetch, 0) AS tuples_fetched
+FROM pg_catalog.pg_index AS index_info
+JOIN pg_catalog.pg_class AS table_class
+    ON table_class.oid = index_info.indrelid
+JOIN pg_catalog.pg_namespace AS table_namespace
+    ON table_namespace.oid = table_class.relnamespace
+JOIN pg_catalog.pg_class AS index_class
+    ON index_class.oid = index_info.indexrelid
+JOIN pg_catalog.pg_am AS access_method
+    ON access_method.oid = index_class.relam
+LEFT JOIN pg_catalog.pg_stat_user_indexes AS index_stats
+    ON index_stats.indexrelid = index_info.indexrelid
+WHERE table_namespace.nspname = $1
+  AND table_class.relname = $2
+ORDER BY index_class.relname;
+"#;
+
+/// Discover indexes and their usage statistics for the given table.
+pub async fn get_table_indexes(
+    client: &Client,
+    schema_name: &str,
+    table_name: &str,
+) -> Result<Vec<TableIndex>, DbError> {
+    let rows = client
+        .query(TABLE_INDEXES_QUERY, &[&schema_name, &table_name])
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| TableIndex {
+            index_name: row.get("index_name"),
+            access_method: row.get("access_method"),
+            is_unique: row.get("is_unique"),
+            is_primary: row.get("is_primary"),
+            is_valid: row.get("is_valid"),
+            is_ready: row.get("is_ready"),
+            definition: row.get("definition"),
+            size_bytes: row.get("size_bytes"),
+            scans: row.get("scans"),
+            tuples_read: row.get("tuples_read"),
+            tuples_fetched: row.get("tuples_fetched"),
+        })
+        .collect())
+}
+
 const REL_KIND_QUERY: &str = r#"
 SELECT n.nspname, c.relname, relkind
 FROM pg_catalog.pg_class c
