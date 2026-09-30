@@ -9,10 +9,10 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use tokio_postgres::Client;
 
-use crate::agent::Response;
+use crate::agent::{AnalysisProgress, Response};
 use crate::config::Connection;
 use crate::db::{QueryOutcome, RelKind};
 use crate::theme;
@@ -45,6 +45,7 @@ pub struct ChatScreen {
     pub input: String,
     input_cursor: usize,
     pub busy: bool,
+    analysis_preview: Option<String>,
     usage_summary: Option<String>,
     scroll: u16,
     /// Models reported by the local Ollama daemon, fetched on screen start.
@@ -70,6 +71,7 @@ impl ChatScreen {
             input: String::new(),
             input_cursor: 0,
             busy: false,
+            analysis_preview: None,
             usage_summary: None,
             scroll: 0,
             models: Vec::new(),
@@ -214,6 +216,7 @@ impl ChatScreen {
             content: text.to_owned(),
         });
         self.usage_summary = None;
+        self.analysis_preview = Some(String::new());
         self.busy = true;
         Some(ChatAction::Analyze(query.to_owned()))
     }
@@ -323,6 +326,7 @@ impl ChatScreen {
 
     pub fn on_analyze_result(&mut self, result: Result<Response, String>) {
         self.busy = false;
+        self.analysis_preview = None;
         match result {
             Ok(response) => {
                 self.usage_summary = Some(format!(
@@ -338,6 +342,15 @@ impl ChatScreen {
                 role: Role::Error,
                 content: err,
             }),
+        }
+    }
+
+    pub fn on_analyze_progress(&mut self, progress: AnalysisProgress) {
+        if let Some(preview) = &mut self.analysis_preview {
+            match progress {
+                AnalysisProgress::Text(text) => preview.push_str(&text),
+                AnalysisProgress::Reset => preview.clear(),
+            }
         }
     }
 
@@ -405,6 +418,10 @@ impl ChatScreen {
             .block(Block::default().borders(Borders::NONE));
         frame.render_widget(log, chunks[1]);
 
+        if let Some(preview) = &self.analysis_preview {
+            self.draw_analysis_preview(frame, chunks[1], preview);
+        }
+
         let input_title = if self.busy { " running… " } else { " query " };
         let input_block = Block::default()
             .borders(Borders::ALL)
@@ -451,6 +468,30 @@ impl ChatScreen {
         frame.render_widget(input, chunks[2]);
 
         self.draw_token_usage(frame, &chunks[2], input_title);
+    }
+
+    fn draw_analysis_preview(&self, frame: &mut Frame<'_>, area: Rect, preview: &str) {
+        let width = (area.width / 3).max(1).min(area.width);
+        let panel_area = Rect::new(area.x + area.width - width, area.y, width, area.height);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::ACCENT))
+            .style(Style::default().fg(theme::TEXT).bg(theme::BG))
+            .title(" generated text ")
+            .title_style(Style::default().fg(theme::ACCENT));
+        let inner = block.inner(panel_area);
+        let paragraph = Paragraph::new(preview).wrap(Wrap { trim: false });
+        let wrap_width = inner.width.max(1) as usize;
+        let line_count = preview
+            .lines()
+            .map(|line| line.chars().count().max(1).div_ceil(wrap_width))
+            .sum::<usize>();
+        let scroll = line_count
+            .saturating_sub(inner.height as usize)
+            .min(u16::MAX as usize) as u16;
+
+        frame.render_widget(Clear, panel_area);
+        frame.render_widget(paragraph.scroll((scroll, 0)).block(block), panel_area);
     }
 
     fn draw_token_usage(&self, frame: &mut Frame<'_>, render_area: &Rect, input_title: &str) {

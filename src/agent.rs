@@ -6,10 +6,11 @@ mod tools;
 
 use std::sync::Arc;
 
+use futures::StreamExt;
 use rig::agent::{AgentHook, HookContext, ToolResultAction, ToolResultEvent};
 use rig::client::{AgentClientExt, ModelLister};
-use rig::completion::Prompt;
 use rig::providers::ollama::{self, OllamaModelLister};
+use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 use serde_json::json;
 use tokio_postgres::Client;
 
@@ -80,6 +81,8 @@ pub enum AgentError {
     Db(#[from] crate::db::DbError),
     #[error("Agent prompt error: {0}")]
     Prompt(#[from] rig::completion::PromptError),
+    #[error("Agent streaming error: {0}")]
+    Streaming(String),
     #[error("Failed to list Ollama models: {0}")]
     ModelListing(String),
 }
@@ -90,6 +93,11 @@ pub struct Response {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub model_requests: usize,
+}
+
+pub enum AnalysisProgress {
+    Text(String),
+    Reset,
 }
 
 /// Query the local Ollama daemon for the set of installed models.
@@ -151,11 +159,12 @@ pub fn build_analyzer_agent(
 }
 
 /// Analyze a SQL query using the Rig agent with query plan and schema inspection tools.
-pub async fn analyze_query(
+pub async fn analyze_query_streaming(
     client: Arc<Client>,
     sql: &str,
     model_name: Option<&str>,
     base_url: Option<&str>,
+    mut on_progress: impl FnMut(AnalysisProgress) + Send,
 ) -> Result<Response, AgentError> {
     // Collect the initial execution plan to seed into the user prompt
     let plan_json = crate::db::explain(&client, sql, Some(crate::db::ExplainFormat::Json)).await?;
@@ -187,7 +196,27 @@ pub async fn analyze_query(
         "
     );
 
-    let response = agent.prompt(&prompt).extended_details().await?;
+    let mut stream = agent.stream_prompt(&prompt).await;
+    let mut final_response = None;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
+                StreamedAssistantContent::Text(text),
+            )) => on_progress(AnalysisProgress::Text(text.text)),
+            Ok(rig::agent::MultiTurnStreamItem::ModelTurnRetried { .. }) => {
+                on_progress(AnalysisProgress::Reset);
+            }
+            Ok(rig::agent::MultiTurnStreamItem::FinalResponse(response)) => {
+                final_response = Some(response);
+            }
+            Ok(_) => {}
+            Err(error) => return Err(AgentError::Streaming(error.to_string())),
+        }
+    }
+
+    let response = final_response.ok_or_else(|| {
+        AgentError::Streaming("stream ended without a final response".to_string())
+    })?;
     Ok(Response {
         answer: response.output,
         input_tokens: response.usage.input_tokens,

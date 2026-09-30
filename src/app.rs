@@ -30,6 +30,7 @@ pub enum AppEvent {
     },
     QueryResult(Result<QueryOutcome, String>),
     ExplainResult(Result<String, String>),
+    AnalyzeProgress(agent::AnalysisProgress),
     AnalyzeResult(Result<agent::Response, String>),
     RelKindResult(Result<RelKind, String>),
     ModelsResult(Result<Vec<String>, String>),
@@ -176,6 +177,11 @@ impl App {
                     chat.on_analyze_result(result);
                 }
             }
+            AppEvent::AnalyzeProgress(progress) => {
+                if let Screen::Chat(chat) = &mut self.screen {
+                    chat.on_analyze_progress(progress);
+                }
+            }
             AppEvent::RelKindResult(result) => {
                 if let Screen::Chat(chat) = &mut self.screen {
                     chat.on_relkind_result(result);
@@ -232,9 +238,18 @@ impl App {
             let client = Arc::clone(&chat.client);
             let model = chat.current_model().map(str::to_owned);
             tokio::spawn(async move {
-                let result = agent::analyze_query(client, &sql, model.as_deref(), None)
-                    .await
-                    .map_err(|e| e.to_string());
+                let progress_tx = tx.clone();
+                let result = agent::analyze_query_streaming(
+                    client,
+                    &sql,
+                    model.as_deref(),
+                    None,
+                    move |progress| {
+                        let _ = progress_tx.send(AppEvent::AnalyzeProgress(progress));
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string());
                 let _ = tx.send(AppEvent::AnalyzeResult(result));
             });
         }
