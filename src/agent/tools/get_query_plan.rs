@@ -61,7 +61,7 @@ impl Tool for GetQueryPlanTool {
             Some(crate::db::ExplainFormat::Json),
         )
         .await?;
-        
+
         log::debug!(execution_plan = plan_json; "Execution plan is ready.");
         log::info!("The tool 'get_query_plan' finished.");
         Ok(plan_json)

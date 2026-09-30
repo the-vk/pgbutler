@@ -194,7 +194,16 @@ pub async fn explain(
         }
     }
 
-    Ok(lines.join("\n"))
+    let output = lines.join("\n");
+
+    // Postgres pretty-prints JSON plans with generous whitespace; re-serialize
+    // compactly since this output is often fed to token-limited LLM contexts.
+    if explain_format == ExplainFormat::Json {
+        let value: Value = serde_json::from_str(&output)?;
+        return Ok(serde_json::to_string(&value)?);
+    }
+
+    Ok(output)
 }
 
 /// A top-level EXPLAIN result representing a statement's execution plan and metadata.
@@ -463,11 +472,13 @@ pub async fn get_view_def(
     relation_name: &str,
 ) -> Result<String, DbError> {
     let rows = client
-        .query(GET_VIEW_DEF_QUERY, &[&format!("{schema_name}.{relation_name}")])
+        .query(
+            GET_VIEW_DEF_QUERY,
+            &[&format!("{schema_name}.{relation_name}")],
+        )
         .await?;
 
-    rows
-        .first()
+    rows.first()
         .map(|v| Ok(v.get("view_def")))
         .unwrap_or(Err(DbError::NoData))
 }

@@ -61,7 +61,8 @@ impl Tool for GetTableSchemaTool {
         log::info!(tool = "get_table_schema", schema = args.schema_name, table = args.table_name; "Running the tool 'get_table_schema'");
         let schema = args.schema_name.as_deref().unwrap_or("public");
         let columns = crate::db::get_table_schema(&self.client, schema, &args.table_name).await?;
-        let output = serde_json::to_string_pretty(&columns)?;
+        // Compact JSON (vs. pretty-printed) to conserve tokens in the model context.
+        let output = serde_json::to_string(&columns)?;
         log::debug!(table_schema = output; "Table schema is ready");
         log::info!(tool = "get_table_schema"; "The tool 'get_table_schema' finished");
         Ok(output)

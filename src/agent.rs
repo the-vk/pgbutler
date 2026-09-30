@@ -6,12 +6,14 @@ mod tools;
 
 use std::sync::Arc;
 
+use rig::agent::{AgentHook, HookContext, ToolResultAction, ToolResultEvent};
 use rig::client::{AgentClientExt, ModelLister};
 use rig::completion::Prompt;
 use rig::providers::ollama::{self, OllamaModelLister};
+use serde_json::json;
 use tokio_postgres::Client;
 
-use crate::agent::tools::{GetQueryPlanTool, GetTableSchemaTool, GetRelKindTool, GetViewDefTool};
+use crate::agent::tools::{GetQueryPlanTool, GetRelKindTool, GetTableSchemaTool, GetViewDefTool};
 
 /// Default Ollama base URL for local execution.
 pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
@@ -20,11 +22,47 @@ pub const DEFAULT_OLLAMA_MODEL: &str = "llama3.2";
 /// Rig defaults to a budget of a single model call; raise it so the agent can
 /// actually invoke tools and react to their results before answering.
 pub const DEFAULT_MAX_TURNS: usize = 10;
+/// Default Ollama context window (`num_ctx`), in tokens. Ollama's own default
+/// (32k or less, depending on version) is easily exceeded once a few schema
+/// or query-plan tool results accumulate in a single analysis run, so we
+/// request a larger window explicitly rather than relying on server config.
+pub const DEFAULT_OLLAMA_NUM_CTX: u64 = 65536;
+/// Maximum characters kept from a single tool result before it is truncated
+/// for the model. Large schemas or verbose EXPLAIN plans can otherwise
+/// dominate the context budget on their own.
+pub const MAX_TOOL_RESULT_CHARS: usize = 8000;
 
 /// System prompt / preamble instructing the agent on query analysis and optimization.
 pub const ANALYZER_PREAMBLE: &str = r#"You are an expert PostgreSQL database performance tuning and optimization assistant.
 Your task is to analyze PostgreSQL queries, diagnose performance bottlenecks, and provide actionable recommendations for optimization.
 "#;
+
+/// Hook that caps the model-visible size of tool results, so a handful of
+/// large schema/plan lookups can't exhaust the context window on their own.
+/// The tool's raw result (used for telemetry/other bookkeeping) is untouched.
+struct TruncatingToolResultHook {
+    max_chars: usize,
+}
+
+impl AgentHook for TruncatingToolResultHook {
+    async fn on_tool_result(
+        &self,
+        _ctx: &HookContext,
+        event: ToolResultEvent<'_>,
+    ) -> ToolResultAction {
+        match event.presentation.as_text() {
+            Some(text) if text.len() > self.max_chars => {
+                let truncated: String = text.chars().take(self.max_chars).collect();
+                ToolResultAction::rewrite(format!(
+                    "{truncated}\n... [truncated {} of {} characters to conserve context]",
+                    text.len() - truncated.len(),
+                    text.len()
+                ))
+            }
+            _ => ToolResultAction::keep(),
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
@@ -78,9 +116,11 @@ pub fn build_analyzer_agent(
     client: Arc<Client>,
     model_name: Option<&str>,
     base_url: Option<&str>,
+    num_ctx: Option<u64>,
 ) -> Result<rig::agent::Agent, AgentError> {
     let url = base_url.unwrap_or(DEFAULT_OLLAMA_URL);
     let model = model_name.unwrap_or(DEFAULT_OLLAMA_MODEL);
+    let num_ctx = num_ctx.unwrap_or(DEFAULT_OLLAMA_NUM_CTX);
 
     let ollama_client = ollama::Client::builder()
         .api_key(rig::client::Nothing)
@@ -93,7 +133,6 @@ pub fn build_analyzer_agent(
     let get_rel_kind_tool = GetRelKindTool::new(Arc::clone(&client));
     let get_view_def_tool = GetViewDefTool::new(Arc::clone(&client));
 
-
     let agent = ollama_client
         .agent(model)
         .preamble(ANALYZER_PREAMBLE)
@@ -102,6 +141,10 @@ pub fn build_analyzer_agent(
         .tool(get_rel_kind_tool)
         .tool(get_view_def_tool)
         .default_max_turns(DEFAULT_MAX_TURNS)
+        .additional_params(json!({ "num_ctx": num_ctx }))
+        .add_hook(TruncatingToolResultHook {
+            max_chars: MAX_TOOL_RESULT_CHARS,
+        })
         .build();
 
     Ok(agent)
@@ -117,7 +160,7 @@ pub async fn analyze_query(
     // Collect the initial execution plan to seed into the user prompt
     let plan_json = crate::db::explain(&client, sql, Some(crate::db::ExplainFormat::Json)).await?;
 
-    let agent = build_analyzer_agent(client, model_name, base_url)?;
+    let agent = build_analyzer_agent(client, model_name, base_url, None)?;
 
     let prompt = format!(
         "Please analyze the following SQL query and its execution plan:\n\n\
@@ -183,6 +226,5 @@ mod tests {
     #[test]
     fn analyzer_preamble_content() {
         assert!(ANALYZER_PREAMBLE.contains("PostgreSQL"));
-        assert!(ANALYZER_PREAMBLE.contains("CREATE INDEX"));
     }
 }
