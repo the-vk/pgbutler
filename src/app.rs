@@ -239,15 +239,21 @@ impl App {
             let model = chat.current_model().map(str::to_owned);
             tokio::spawn(async move {
                 let progress_tx = tx.clone();
-                let result = agent::analyze_query_streaming(
-                    client,
-                    &sql,
-                    model.as_deref(),
-                    None,
-                    move |progress| {
-                        let _ = progress_tx.send(AppEvent::AnalyzeProgress(progress));
-                    },
-                )
+                let result = async {
+                    let config = agent::ProviderConfig::load()?;
+                    let provider = config.build()?;
+                    let model = model.as_deref().or(config.model());
+                    agent::analyze_query_streaming(
+                        client,
+                        &sql,
+                        provider.as_ref(),
+                        model,
+                        move |progress| {
+                            let _ = progress_tx.send(AppEvent::AnalyzeProgress(progress));
+                        },
+                    )
+                    .await
+                }
                 .await
                 .map_err(|e| e.to_string());
                 let _ = tx.send(AppEvent::AnalyzeResult(result));
@@ -271,9 +277,12 @@ impl App {
     fn spawn_fetch_models(&self) {
         let tx = self.events_tx.clone();
         tokio::spawn(async move {
-            let result = agent::list_ollama_models(None)
-                .await
-                .map_err(|e| e.to_string());
+            let result = async {
+                let config = agent::ProviderConfig::load()?;
+                agent::list_models(&config).await
+            }
+            .await
+            .map_err(|e| e.to_string());
             let _ = tx.send(AppEvent::ModelsResult(result));
         });
     }

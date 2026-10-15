@@ -2,34 +2,24 @@
 
 #![allow(dead_code)]
 
+mod provider;
 mod tools;
 
 use std::sync::Arc;
 
 use futures::StreamExt;
 use rig::agent::{AgentHook, HookContext, ToolResultAction, ToolResultEvent};
-use rig::client::{AgentClientExt, ModelLister};
-use rig::providers::ollama::{self, OllamaModelLister};
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
-use serde_json::json;
 use tokio_postgres::Client;
 
+pub use crate::agent::provider::{AgentProvider, ProviderConfig};
 use crate::agent::tools::{
     GetQueryPlanTool, GetRelKindTool, GetTableIndexesTool, GetTableSchemaTool, GetViewDefTool,
 };
 
-/// Default Ollama base URL for local execution.
-pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
-/// Default model used for query analysis.
-pub const DEFAULT_OLLAMA_MODEL: &str = "llama3.2";
 /// Rig defaults to a budget of a single model call; raise it so the agent can
 /// actually invoke tools and react to their results before answering.
 pub const DEFAULT_MAX_TURNS: usize = 10;
-/// Default Ollama context window (`num_ctx`), in tokens. Ollama's own default
-/// (32k or less, depending on version) is easily exceeded once a few schema
-/// or query-plan tool results accumulate in a single analysis run, so we
-/// request a larger window explicitly rather than relying on server config.
-pub const DEFAULT_OLLAMA_NUM_CTX: u64 = 65536;
 /// Maximum characters kept from a single tool result before it is truncated
 /// for the model. Large schemas or verbose EXPLAIN plans can otherwise
 /// dominate the context budget on their own.
@@ -77,15 +67,17 @@ pub enum ToolError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
-    #[error("Failed to initialize Ollama client: {0}")]
+    #[error("Failed to initialize provider client: {0}")]
     ClientInit(String),
+    #[error("Invalid agent configuration: {0}")]
+    Config(String),
     #[error("Database error during analysis: {0}")]
     Db(#[from] crate::db::DbError),
     #[error("Agent prompt error: {0}")]
     Prompt(#[from] rig::completion::PromptError),
     #[error("Agent streaming error: {0}")]
     Streaming(String),
-    #[error("Failed to list Ollama models: {0}")]
+    #[error("Failed to list models: {0}")]
     ModelListing(String),
 }
 
@@ -102,41 +94,18 @@ pub enum AnalysisProgress {
     Reset,
 }
 
-/// Query the local Ollama daemon for the set of installed models.
-pub async fn list_ollama_models(base_url: Option<&str>) -> Result<Vec<String>, AgentError> {
-    let url = base_url.unwrap_or(DEFAULT_OLLAMA_URL);
-
-    let ollama_client = ollama::Client::builder()
-        .api_key(rig::client::Nothing)
-        .base_url(url)
-        .build()
-        .map_err(|e| AgentError::ClientInit(e.to_string()))?;
-
-    let lister = OllamaModelLister::new(ollama_client);
-    let models = lister
-        .list_all()
-        .await
-        .map_err(|e| AgentError::ModelListing(e.to_string()))?;
-
-    Ok(models.iter().map(|m| m.id.clone()).collect())
+/// List the models offered by the configured provider.
+pub async fn list_models(config: &ProviderConfig) -> Result<Vec<String>, AgentError> {
+    config.build()?.list_models().await
 }
 
-/// Build a configured query analyzer agent using local Ollama.
+/// Build a configured query analyzer agent on top of any provider.
 pub fn build_analyzer_agent(
     client: Arc<Client>,
+    provider: &dyn AgentProvider,
     model_name: Option<&str>,
-    base_url: Option<&str>,
-    num_ctx: Option<u64>,
 ) -> Result<rig::agent::Agent, AgentError> {
-    let url = base_url.unwrap_or(DEFAULT_OLLAMA_URL);
-    let model = model_name.unwrap_or(DEFAULT_OLLAMA_MODEL);
-    let num_ctx = num_ctx.unwrap_or(DEFAULT_OLLAMA_NUM_CTX);
-
-    let ollama_client = ollama::Client::builder()
-        .api_key(rig::client::Nothing)
-        .base_url(url)
-        .build()
-        .map_err(|e| AgentError::ClientInit(e.to_string()))?;
+    let model = model_name.unwrap_or_else(|| provider.default_model());
 
     let plan_tool = GetQueryPlanTool::new(Arc::clone(&client));
     let schema_tool = GetTableSchemaTool::new(Arc::clone(&client));
@@ -144,8 +113,8 @@ pub fn build_analyzer_agent(
     let get_rel_kind_tool = GetRelKindTool::new(Arc::clone(&client));
     let get_view_def_tool = GetViewDefTool::new(Arc::clone(&client));
 
-    let agent = ollama_client
-        .agent(model)
+    let agent = provider
+        .agent_builder(model)?
         .preamble(ANALYZER_PREAMBLE)
         .tool(plan_tool)
         .tool(schema_tool)
@@ -153,7 +122,6 @@ pub fn build_analyzer_agent(
         .tool(get_rel_kind_tool)
         .tool(get_view_def_tool)
         .default_max_turns(DEFAULT_MAX_TURNS)
-        .additional_params(json!({ "num_ctx": num_ctx }))
         .add_hook(TruncatingToolResultHook {
             max_chars: MAX_TOOL_RESULT_CHARS,
         })
@@ -166,14 +134,14 @@ pub fn build_analyzer_agent(
 pub async fn analyze_query_streaming(
     client: Arc<Client>,
     sql: &str,
+    provider: &dyn AgentProvider,
     model_name: Option<&str>,
-    base_url: Option<&str>,
     mut on_progress: impl FnMut(AnalysisProgress) + Send,
 ) -> Result<Response, AgentError> {
     // Collect the initial execution plan to seed into the user prompt
     let plan_json = crate::db::explain(&client, sql, Some(crate::db::ExplainFormat::Json)).await?;
 
-    let agent = build_analyzer_agent(client, model_name, base_url, None)?;
+    let agent = build_analyzer_agent(client, provider, model_name)?;
 
     let prompt = format!(
         "Please analyze the following SQL query and its execution plan:\n\n\
