@@ -9,7 +9,7 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 use tokio_postgres::Client;
 
-use crate::agent;
+use crate::{agent, config};
 use crate::config::Connection;
 use crate::db::{self, QueryOutcome, RelKind};
 use crate::ui::chat::{ChatAction, ChatScreen};
@@ -240,9 +240,10 @@ impl App {
             tokio::spawn(async move {
                 let progress_tx = tx.clone();
                 let result = async {
-                    let config = agent::ProviderConfig::load()?;
-                    let provider = config.build()?;
-                    let model = model.as_deref().or(config.model());
+                    let config = config::Config::read().map_err(|e| agent::AgentError::Config(e.to_string()))?;
+                    log::info!(model = config.app.provider; "Selected model");
+                    let provider = agent::build(&config)?;
+                    let model = model.as_deref();
                     agent::analyze_query_streaming(
                         client,
                         &sql,
@@ -278,7 +279,7 @@ impl App {
         let tx = self.events_tx.clone();
         tokio::spawn(async move {
             let result = async {
-                let config = agent::ProviderConfig::load()?;
+                let config = config::Config::read().map_err(|e| agent::AgentError::Config(e.to_string()))?;
                 agent::list_models(&config).await
             }
             .await

@@ -8,6 +8,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use color_eyre::eyre::Result;
 use serde::{Deserialize, Serialize};
 
 mod keyring;
@@ -15,6 +16,140 @@ mod sslmode;
 
 pub use keyring::{read_master_key, write_master_key};
 pub use sslmode::SslMode;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderConfig {
+    Ollama(OllamaConfig),
+}
+
+const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
+const DEFAULT_OLLAMA_MODEL: &str = "llama3.2";
+const DEFAULT_OLLAMA_NUM_CTX: u64 = 65536;
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct OllamaConfig {
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub num_ctx: Option<u64>,
+}
+
+impl Default for OllamaConfig {
+    fn default() -> Self {
+        Self {
+            base_url: Some(DEFAULT_OLLAMA_URL.to_owned()),
+            model: Some(DEFAULT_OLLAMA_MODEL.to_owned()),
+            num_ctx: Some(DEFAULT_OLLAMA_NUM_CTX),
+        }
+    }
+}
+
+impl OllamaConfig {
+    fn with_defaults(&self) -> Self {
+        let defaults = Self::default();
+        Self {
+            base_url: self.base_url.clone().or(defaults.base_url),
+            model: self.model.clone().or(defaults.model),
+            num_ctx: self.num_ctx.or(defaults.num_ctx),
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AppSection {
+    pub provider: String,
+}
+
+impl Default for AppSection {
+    fn default() -> Self {
+        Self {
+            provider: "ollama".to_owned(),
+        }
+    }
+}
+
+impl AppSection {
+    fn with_defaults(&self) -> Self {
+        self.clone()
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(default)]
+struct Providers {
+    ollama: Option<OllamaConfig>,
+}
+
+impl Providers {
+    fn select(&self, name: &str) -> Result<ProviderConfig, String> {
+        match name {
+            "ollama" => Ok(ProviderConfig::Ollama(
+                self.ollama.clone().ok_or("provider 'ollama' selectred but no [provider.ollama] section is set")?,
+            )),
+            other => Err(format!("unknown provider '{other}'"))
+        }
+    }
+
+    fn with_defaults(&self) -> Self {
+        Self {
+            ollama: Some(
+                self.ollama
+                    .as_ref()
+                    .map(OllamaConfig::with_defaults)
+                    .unwrap_or_default(),
+            ),
+        }
+    }
+}
+
+impl Default for Providers {
+    fn default() -> Self {
+        Self {
+            ollama: Some(OllamaConfig::default()),
+        }
+    }
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Config {
+    pub app: AppSection,
+    provider: Providers
+}
+
+impl Config {
+    pub fn read() -> Result<Config> {
+        let config_file = config_file();
+        if !config_file.exists() {
+            return Ok(Config::default());
+        }
+
+        let config_content = fs::read_to_string(config_file)?;
+        Ok(toml::from_str::<Config>(&config_content)?.with_defaults())
+    }
+
+    pub fn write(&self) -> Result<()> {
+        let config_content = toml::to_string(&self)?;
+        let config_file = config_file();
+        Ok(fs::write(config_file, config_content)?)
+    }
+
+    pub fn select_provider(&self) -> Result<ProviderConfig, String> {
+        self.provider.select(&self.app.provider)
+    }
+
+    fn with_defaults(&self) -> Self {
+        Self {
+            app: self.app.with_defaults(),
+            provider: self.provider.with_defaults(),
+        }
+    }
+}
 
 pub fn default_schema() -> Option<String> {
     Some("public".to_string())
@@ -196,6 +331,10 @@ pub fn connections_dir() -> PathBuf {
     app_dir().join("connections")
 }
 
+pub fn config_file() -> PathBuf {
+    log_dir().join("config.toml")
+}
+
 /// List all connection profiles found on disk, sorted by name.
 pub fn list_connections() -> std::io::Result<Vec<Connection>> {
     let dir = connections_dir();
@@ -244,6 +383,27 @@ fn sanitize_filename(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selecting_provider_fills_missing_ollama_defaults() {
+        let config = Config {
+            app: AppSection::default(),
+            provider: Providers {
+                ollama: Some(OllamaConfig {
+                    base_url: None,
+                    model: Some("qwen3".to_string()),
+                    num_ctx: None,
+                }),
+            },
+        };
+
+        let normalized = config.with_defaults();
+        let ProviderConfig::Ollama(ollama) = normalized.select_provider().expect("provider");
+        assert_eq!(ollama.base_url.as_deref(), Some(DEFAULT_OLLAMA_URL));
+        assert_eq!(ollama.model.as_deref(), Some("qwen3"));
+        assert_eq!(ollama.num_ctx, Some(DEFAULT_OLLAMA_NUM_CTX));
+        assert!(config.provider.ollama.as_ref().unwrap().base_url.is_none());
+    }
 
     #[test]
     #[ignore = "touches the real macOS login Keychain (creates/reads the master key); run manually"]

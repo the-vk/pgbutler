@@ -8,16 +8,7 @@ use serde_json::json;
 
 use super::AgentProvider;
 use crate::agent::AgentError;
-
-/// Default Ollama base URL for local execution.
-pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
-/// Default model used for query analysis.
-pub const DEFAULT_OLLAMA_MODEL: &str = "llama3.2";
-/// Default Ollama context window (`num_ctx`), in tokens. Ollama's own default
-/// (32k or less, depending on version) is easily exceeded once a few schema
-/// or query-plan tool results accumulate in a single analysis run, so we
-/// request a larger window explicitly rather than relying on server config.
-pub const DEFAULT_OLLAMA_NUM_CTX: u64 = 65536;
+use crate::config::OllamaConfig;
 
 pub struct OllamaProvider {
     client: ollama::Client,
@@ -25,15 +16,15 @@ pub struct OllamaProvider {
 }
 
 impl OllamaProvider {
-    pub fn new(base_url: Option<&str>, num_ctx: Option<u64>) -> Result<Self, AgentError> {
+    pub fn new(config: &OllamaConfig) -> Result<Self, AgentError> {
         let client = ollama::Client::builder()
             .api_key(rig::client::Nothing)
-            .base_url(base_url.unwrap_or(DEFAULT_OLLAMA_URL))
+            .base_url(config.base_url.clone().unwrap())
             .build()
             .map_err(|e| AgentError::ClientInit(e.to_string()))?;
         Ok(Self {
             client,
-            num_ctx: num_ctx.unwrap_or(DEFAULT_OLLAMA_NUM_CTX),
+            num_ctx: config.num_ctx.unwrap(),
         })
     }
 }
@@ -44,7 +35,7 @@ impl AgentProvider for OllamaProvider {
     }
 
     fn default_model(&self) -> &str {
-        DEFAULT_OLLAMA_MODEL
+        ""
     }
 
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {

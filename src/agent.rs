@@ -12,10 +12,11 @@ use rig::agent::{AgentHook, HookContext, ToolResultAction, ToolResultEvent};
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 use tokio_postgres::Client;
 
-pub use crate::agent::provider::{AgentProvider, ProviderConfig};
+pub use crate::agent::provider::{AgentProvider, build};
 use crate::agent::tools::{
     GetQueryPlanTool, GetRelKindTool, GetTableIndexesTool, GetTableSchemaTool, GetViewDefTool,
 };
+use crate::config::Config;
 
 /// Rig defaults to a budget of a single model call; raise it so the agent can
 /// actually invoke tools and react to their results before answering.
@@ -95,8 +96,8 @@ pub enum AnalysisProgress {
 }
 
 /// List the models offered by the configured provider.
-pub async fn list_models(config: &ProviderConfig) -> Result<Vec<String>, AgentError> {
-    config.build()?.list_models().await
+pub async fn list_models(config: &Config) -> Result<Vec<String>, AgentError> {
+    provider::build(config)?.list_models().await
 }
 
 /// Build a configured query analyzer agent on top of any provider.
