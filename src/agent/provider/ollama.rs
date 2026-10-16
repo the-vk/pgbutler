@@ -13,6 +13,7 @@ use crate::config::OllamaConfig;
 pub struct OllamaProvider {
     client: ollama::Client,
     num_ctx: u64,
+    model: String,
 }
 
 impl OllamaProvider {
@@ -25,6 +26,7 @@ impl OllamaProvider {
         Ok(Self {
             client,
             num_ctx: config.num_ctx.unwrap(),
+            model: config.model.clone().unwrap(),
         })
     }
 }
@@ -35,7 +37,7 @@ impl AgentProvider for OllamaProvider {
     }
 
     fn default_model(&self) -> &str {
-        ""
+        &self.model
     }
 
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {

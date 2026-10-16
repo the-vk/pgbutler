@@ -14,6 +14,7 @@ use logforth::{
     record::{Level, LevelFilter},
 };
 use std::io::stdout;
+use std::sync::Arc;
 
 #[cfg(unix)]
 struct KeyboardEnhancementGuard {
@@ -127,10 +128,12 @@ async fn main() -> color_eyre::Result<()> {
 
     color_eyre::install()?;
 
+    let config = Arc::new(crate::config::Config::read()?);
+
     let terminal = ratatui::init();
     let bracketed_paste = BracketedPasteGuard::enable();
     let keyboard_enhancement = KeyboardEnhancementGuard::enable_if_supported();
-    let result = App::new().run(terminal).await;
+    let result = App::new(config).run(terminal).await;
     drop(keyboard_enhancement);
     drop(bracketed_paste);
     ratatui::restore();

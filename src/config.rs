@@ -7,6 +7,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 
 use color_eyre::eyre::Result;
 use serde::{Deserialize, Serialize};
@@ -115,27 +116,31 @@ impl Default for Providers {
     }
 }
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
     pub app: AppSection,
-    provider: Providers
+    provider: Providers,
+    #[serde(skip)]
+    connections: RwLock<Vec<Connection>>,
 }
 
 impl Config {
     pub fn read() -> Result<Config> {
         let config_file = config_file();
-        if !config_file.exists() {
-            return Ok(Config::default());
-        }
-
-        let config_content = fs::read_to_string(config_file)?;
-        Ok(toml::from_str::<Config>(&config_content)?.with_defaults())
+        let mut config = if config_file.exists() {
+            read_config_file(&config_file)?
+        } else {
+            Config::default()
+        };
+        config.connections = RwLock::new(load_connection_profiles()?);
+        Ok(config.with_defaults())
     }
 
     pub fn write(&self) -> Result<()> {
         let config_content = toml::to_string(&self)?;
         let config_file = config_file();
+        fs::create_dir_all(app_dir())?;
         Ok(fs::write(config_file, config_content)?)
     }
 
@@ -143,12 +148,41 @@ impl Config {
         self.provider.select(&self.app.provider)
     }
 
+    pub fn connections(&self) -> Vec<Connection> {
+        self.connections
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn save_connection(&self, conn: &Connection) -> std::io::Result<PathBuf> {
+        let path = save_connection_profile(conn)?;
+        let mut connections = self
+            .connections
+            .write()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if let Some(existing) = connections.iter_mut().find(|existing| existing.name == conn.name)
+        {
+            *existing = conn.clone();
+        } else {
+            connections.push(conn.clone());
+        }
+        connections.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(path)
+    }
+
     fn with_defaults(&self) -> Self {
         Self {
             app: self.app.with_defaults(),
             provider: self.provider.with_defaults(),
+            connections: RwLock::new(self.connections()),
         }
     }
+}
+
+fn read_config_file(path: &Path) -> Result<Config> {
+    let config_content = fs::read_to_string(path)?;
+    Ok(toml::from_str(&config_content)?)
 }
 
 pub fn default_schema() -> Option<String> {
@@ -332,11 +366,10 @@ pub fn connections_dir() -> PathBuf {
 }
 
 pub fn config_file() -> PathBuf {
-    log_dir().join("config.toml")
+    app_dir().join("config.toml")
 }
 
-/// List all connection profiles found on disk, sorted by name.
-pub fn list_connections() -> std::io::Result<Vec<Connection>> {
+fn load_connection_profiles() -> std::io::Result<Vec<Connection>> {
     let dir = connections_dir();
     if !dir.exists() {
         return Ok(Vec::new());
@@ -358,8 +391,7 @@ pub fn list_connections() -> std::io::Result<Vec<Connection>> {
     Ok(connections)
 }
 
-/// Persist a connection profile to `~/.pgbutler/connections/<name>.toml`.
-pub fn save_connection(conn: &Connection) -> std::io::Result<PathBuf> {
+fn save_connection_profile(conn: &Connection) -> std::io::Result<PathBuf> {
     let dir = connections_dir();
     fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.toml", sanitize_filename(&conn.name)));
@@ -395,6 +427,7 @@ mod tests {
                     num_ctx: None,
                 }),
             },
+            ..Config::default()
         };
 
         let normalized = config.with_defaults();

@@ -39,6 +39,7 @@ pub enum AppEvent {
 pub struct App {
     pub screen: Screen,
     pub should_quit: bool,
+    config: Arc<config::Config>,
     events_tx: mpsc::UnboundedSender<AppEvent>,
     events_rx: mpsc::UnboundedReceiver<AppEvent>,
 }
@@ -47,9 +48,9 @@ impl App {
     /// Build the initial app state: skip straight to the connection setup
     /// wizard if no connection profiles exist yet, otherwise open the first
     /// saved connection directly.
-    pub fn new() -> Self {
+    pub fn new(config: Arc<config::Config>) -> Self {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
-        let connections = crate::config::list_connections().unwrap_or_default();
+        let connections = config.connections();
 
         let screen = if let Some(conn) = connections.into_iter().next() {
             let mut setup = SetupScreen::from_connection(conn);
@@ -62,6 +63,7 @@ impl App {
         Self {
             screen,
             should_quit: false,
+            config,
             events_tx,
             events_rx,
         }
@@ -154,7 +156,9 @@ impl App {
                     setup.connecting = false;
                     match result {
                         Ok(client) => {
-                            let _ = crate::config::save_connection(&conn);
+                            if let Err(error) = self.config.save_connection(&conn) {
+                                log::warn!("Failed to save connection profile: {error}");
+                            }
                             self.screen = Screen::Chat(ChatScreen::new(*conn, client));
                             self.spawn_fetch_models();
                         }
@@ -234,16 +238,16 @@ impl App {
 
     fn spawn_analyze(&self, sql: String) {
         let tx = self.events_tx.clone();
+        let config = Arc::clone(&self.config);
         if let Screen::Chat(chat) = &self.screen {
             let client = Arc::clone(&chat.client);
             let model = chat.current_model().map(str::to_owned);
             tokio::spawn(async move {
                 let progress_tx = tx.clone();
                 let result = async {
-                    let config = config::Config::read().map_err(|e| agent::AgentError::Config(e.to_string()))?;
-                    log::info!(model = config.app.provider; "Selected model");
                     let provider = agent::build(&config)?;
                     let model = model.as_deref();
+                    log::info!(model = model.unwrap_or_else(|| provider.default_model()); "Selected model");
                     agent::analyze_query_streaming(
                         client,
                         &sql,
@@ -277,13 +281,9 @@ impl App {
 
     fn spawn_fetch_models(&self) {
         let tx = self.events_tx.clone();
+        let config = Arc::clone(&self.config);
         tokio::spawn(async move {
-            let result = async {
-                let config = config::Config::read().map_err(|e| agent::AgentError::Config(e.to_string()))?;
-                agent::list_models(&config).await
-            }
-            .await
-            .map_err(|e| e.to_string());
+            let result = agent::list_models(&config).await.map_err(|e| e.to_string());
             let _ = tx.send(AppEvent::ModelsResult(result));
         });
     }
