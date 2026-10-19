@@ -454,13 +454,14 @@ impl ChatScreen {
             ])
             .split(area);
 
+        let provider_label = self.config.provider_name();
         let model_label = self.current_model().unwrap_or("<no models available>");
         draw_banner(
             frame,
             chunks[0],
             &format!(
-                "{} — {}@{} — model: {} (Ctrl+m to switch)",
-                self.conn.name, self.conn.login, self.conn.host, model_label
+                "{} — {}@{} — provider: {} model: {} (Ctrl+m to switch)",
+                self.conn.name, self.conn.login, self.conn.host, provider_label, model_label
             ),
         );
 
