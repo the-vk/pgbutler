@@ -107,6 +107,7 @@ impl App {
                 }
             }
         }
+        self.config.write()?;
         Ok(())
     }
 
