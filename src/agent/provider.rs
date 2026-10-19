@@ -36,9 +36,7 @@ pub trait AgentProvider: Send + Sync {
 pub fn build(config: &Config) -> Result<Arc<dyn AgentProvider>, AgentError> {
     let provider_config = config.select_provider().map_err(|v| AgentError::Config(v))?;
     match provider_config {
-        ProviderConfig::Ollama(ollama_config) => {
-            Ok(Arc::new(OllamaProvider::new(&ollama_config)?))
-        }
+        ProviderConfig::Ollama(cfg) => {Ok(Arc::new(OllamaProvider::new(&cfg)?))}
         ProviderConfig::Anthropic(cfg) => Ok(Arc::new(AnthropicProvider::new(&cfg)?)),
         ProviderConfig::OpenAi(cfg) => Ok(Arc::new(OpenAiProvider::new(&cfg)?)),
     }
