@@ -102,6 +102,15 @@ pub async fn list_models(config: &Config) -> Result<Vec<String>, AgentError> {
     provider::build(config)?.list_models().await
 }
 
+/// Check that the configured provider is usable: `true` if no API key is
+/// needed or the key is present and accepted, `false` if it is missing or invalid.
+pub async fn is_provider_ready(config: &Config) -> bool {
+    match provider::build(config) {
+        Ok(provider) => provider.is_ready().await,
+        Err(_) => false,
+    }
+}
+
 /// Build a configured query analyzer agent on top of any provider.
 pub fn build_analyzer_agent(
     client: Arc<Client>,

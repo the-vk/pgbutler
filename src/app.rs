@@ -34,6 +34,7 @@ pub enum AppEvent {
     AnalyzeResult(Result<agent::Response, String>),
     RelKindResult(Result<RelKind, String>),
     ModelsResult(Result<Vec<String>, String>),
+    ProviderReady(bool),
 }
 
 pub struct App {
@@ -135,7 +136,7 @@ impl App {
                                 ChatAction::RelKind(schema, relation) => {
                                     self.spawn_relkind(schema, relation)
                                 }
-                                ChatAction::RefreshModels => self.spawn_fetch_models(),
+                                ChatAction::RefreshModels => self.spawn_switch_provider(),
                             }
                         }
                     }
@@ -190,6 +191,11 @@ impl App {
             AppEvent::RelKindResult(result) => {
                 if let Screen::Chat(chat) = &mut self.screen {
                     chat.on_relkind_result(result);
+                }
+            }
+            AppEvent::ProviderReady(ready) => {
+                if let Screen::Chat(chat) = &mut self.screen {
+                    chat.on_provider_ready(ready);
                 }
             }
             AppEvent::ModelsResult(result) => {
@@ -278,6 +284,21 @@ impl App {
                 let _ = tx.send(AppEvent::RelKindResult(result));
             });
         }
+    }
+
+    fn spawn_switch_provider(&self) {
+        let tx = self.events_tx.clone();
+        let config = Arc::clone(&self.config);
+        tokio::spawn(async move {
+            let ready = agent::is_provider_ready(&config).await;
+            let _ = tx.send(AppEvent::ProviderReady(ready));
+            let result = if ready {
+                agent::list_models(&config).await.map_err(|e| e.to_string())
+            } else {
+                Ok(Vec::new())
+            };
+            let _ = tx.send(AppEvent::ModelsResult(result));
+        });
     }
 
     fn spawn_fetch_models(&self) {

@@ -314,6 +314,7 @@ impl ChatScreen {
             content: "/api-key ********".to_owned(),
         });
         let api_key = api_key.trim();
+        let mut action = None;
         let reply = if api_key.is_empty() {
             Message {
                 role: Role::System,
@@ -321,10 +322,13 @@ impl ChatScreen {
             }
         } else {
             match self.config.set_api_key(api_key) {
-                Ok(()) => Message {
-                    role: Role::System,
-                    content: format!("API key set for provider '{}'.", self.config.provider_name()),
-                },
+                Ok(()) => {
+                    action = Some(ChatAction::RefreshModels);
+                    Message {
+                        role: Role::System,
+                        content: format!("API key set for provider '{}'.", self.config.provider_name()),
+                    }
+                }
                 Err(err) => Message {
                     role: Role::Error,
                     content: err,
@@ -332,7 +336,7 @@ impl ChatScreen {
             }
         };
         self.messages.push(reply);
-        None
+        action
     }
 
     fn handle_help_command(&mut self, text: &str) -> Option<ChatAction> {
@@ -420,6 +424,18 @@ impl ChatScreen {
                 AnalysisProgress::Text(text) => preview.push_str(&text),
                 AnalysisProgress::Reset => preview.clear(),
             }
+        }
+    }
+
+    pub fn on_provider_ready(&mut self, ready: bool) {
+        if !ready {
+            self.messages.push(Message {
+                role: Role::System,
+                content: format!(
+                    "Provider '{}' has a missing or invalid API key. Use /api-key <key> to set it.",
+                    self.config.provider_name()
+                ),
+            });
         }
     }
 

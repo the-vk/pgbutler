@@ -28,6 +28,11 @@ pub trait AgentProvider: Send + Sync {
     /// Models offered by the backend.
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>>;
 
+    /// Whether the backend is usable; by default, listing models must succeed.
+    fn is_ready(&self) -> BoxFuture<'_, bool> {
+        Box::pin(async move { self.list_models().await.is_ok() })
+    }
+
     /// Start building an agent for `model`; the caller adds preamble, tools
     /// and hooks.
     fn agent_builder(&self, model: &str) -> Result<AgentBuilder, AgentError>;

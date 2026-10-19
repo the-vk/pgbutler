@@ -48,6 +48,10 @@ impl AgentProvider for OllamaProvider {
         })
     }
 
+    fn is_ready(&self) -> BoxFuture<'_, bool> {
+        Box::pin(async { true })
+    }
+
     fn agent_builder(&self, model: &str) -> Result<AgentBuilder, AgentError> {
         Ok(AgentBuilder::new(self.client.native_completion(model))
             .additional_params(json!({ "num_ctx": self.num_ctx })))
