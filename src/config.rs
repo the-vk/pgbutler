@@ -204,8 +204,8 @@ impl Default for Providers {
     fn default() -> Self {
         Self {
             ollama: Some(OllamaConfig::default()),
-            anthropic: None,
-            openai: None,
+            anthropic: Some(AnthropicConfig::default()),
+            openai: Some(OpenAiConfig::default()),
         }
     }
 }
@@ -213,8 +213,8 @@ impl Default for Providers {
 #[derive(Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
-    pub app: AppSection,
-    provider: Providers,
+    app: RwLock<AppSection>,
+    provider: RwLock<Providers>,
     #[serde(skip)]
     connections: RwLock<Vec<Connection>>,
 }
@@ -239,7 +239,47 @@ impl Config {
     }
 
     pub fn select_provider(&self) -> Result<ProviderConfig, String> {
-        self.provider.select(&self.app.provider)
+        self.providers().select(&self.provider_name())
+    }
+
+    fn providers(&self) -> std::sync::RwLockReadGuard<'_, Providers> {
+        self.provider
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Set the API key of the currently selected provider.
+    pub fn set_api_key(&self, api_key: &str) -> Result<(), String> {
+        let name = self.provider_name();
+        let mut providers = self
+            .provider
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match name.as_str() {
+            "anthropic" => providers.anthropic.as_mut().map(|c| c.api_key = api_key.to_owned()),
+            "openai" => providers.openai.as_mut().map(|c| c.api_key = api_key.to_owned()),
+            "ollama" => return Err("provider 'ollama' does not use an API key".into()),
+            other => return Err(format!("unknown provider '{other}'")),
+        }
+        .ok_or_else(|| format!("no [provider.{name}] section is set"))
+    }
+
+    pub fn provider_name(&self) -> String {
+        self.app
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .provider
+            .clone()
+    }
+
+    /// Switch the active provider; fails if it is unknown or has no config section.
+    pub fn set_provider(&self, name: &str) -> Result<(), String> {
+        self.providers().select(name)?;
+        self.app
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .provider = name.to_owned();
+        Ok(())
     }
 
     pub fn connections(&self) -> Vec<Connection> {
@@ -267,8 +307,13 @@ impl Config {
 
     fn with_defaults(&self) -> Self {
         Self {
-            app: self.app.with_defaults(),
-            provider: self.provider.with_defaults(),
+            app: RwLock::new(
+                self.app
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .with_defaults(),
+            ),
+            provider: RwLock::new(self.providers().with_defaults()),
             connections: RwLock::new(self.connections()),
         }
     }
@@ -513,15 +558,15 @@ mod tests {
     #[test]
     fn selecting_provider_fills_missing_ollama_defaults() {
         let config = Config {
-            app: AppSection::default(),
-            provider: Providers {
+            app: RwLock::new(AppSection::default()),
+            provider: RwLock::new(Providers {
                 ollama: Some(OllamaConfig {
                     base_url: None,
                     model: Some("qwen3".to_string()),
                     num_ctx: None,
                 }),
                 ..Providers::default()
-            },
+            }),
             ..Config::default()
         };
 
@@ -533,7 +578,7 @@ mod tests {
         assert_eq!(ollama.base_url.as_deref(), Some(DEFAULT_OLLAMA_URL));
         assert_eq!(ollama.model.as_deref(), Some("qwen3"));
         assert_eq!(ollama.num_ctx, Some(DEFAULT_OLLAMA_NUM_CTX));
-        assert!(config.provider.ollama.as_ref().unwrap().base_url.is_none());
+        assert!(config.providers().ollama.as_ref().unwrap().base_url.is_none());
     }
 
     #[test]

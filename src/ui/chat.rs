@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use tokio_postgres::Client;
 
 use crate::agent::{AnalysisProgress, Response};
-use crate::config::Connection;
+use crate::config::{Config, Connection};
 use crate::db::{QueryOutcome, RelKind};
 use crate::theme;
 use crate::ui::draw_banner;
@@ -36,11 +36,14 @@ pub enum ChatAction {
     Explain(String),
     Analyze(String),
     RelKind(String, String),
+    /// Provider changed; reload its model list.
+    RefreshModels,
 }
 
 pub struct ChatScreen {
     pub conn: Connection,
     pub client: Arc<Client>,
+    pub config: Arc<Config>,
     pub messages: Vec<Message>,
     pub input: String,
     input_cursor: usize,
@@ -55,7 +58,7 @@ pub struct ChatScreen {
 }
 
 impl ChatScreen {
-    pub fn new(conn: Connection, client: Client) -> Self {
+    pub fn new(conn: Connection, client: Client, config: Arc<Config>) -> Self {
         let mut messages = Vec::new();
         messages.push(Message {
             role: Role::System,
@@ -67,6 +70,7 @@ impl ChatScreen {
         Self {
             conn,
             client: Arc::new(client),
+            config,
             messages,
             input: String::new(),
             input_cursor: 0,
@@ -88,6 +92,7 @@ impl ChatScreen {
 
     /// Store the models available from Ollama and select the first one.
     pub fn on_models_result(&mut self, models: Vec<String>) {
+        self.busy = false;
         self.selected_model = if models.is_empty() { None } else { Some(0) };
         self.models = models;
     }
@@ -192,6 +197,8 @@ impl ChatScreen {
             "/analyze" => self.handle_analyze_command(text, query),
             "/explain" => self.handle_explain_command(text, query),
             "/relkind" => self.handle_relkind_command(text, query),
+            "/provider" => self.handle_provider_command(text, query),
+            "/api-key" => self.handle_api_key_command(query),
             "/query" => Some(ChatAction::Query(query.to_owned())),
             "/help" => self.handle_help_command(text),
             "/whoami" => self.handle_whoami_command(text),
@@ -266,8 +273,70 @@ impl ChatScreen {
         None
     }
 
+    fn handle_provider_command(&mut self, text: &str, name: &str) -> Option<ChatAction> {
+        self.messages.push(Message {
+            role: Role::User,
+            content: text.to_owned(),
+        });
+        let name = name.trim();
+        if name.is_empty() {
+            self.messages.push(Message {
+                role: Role::System,
+                content: format!(
+                    "Current provider: {}. Usage: /provider <ollama|anthropic|openai>",
+                    self.config.provider_name()
+                ),
+            });
+            return None;
+        }
+        match self.config.set_provider(name) {
+            Ok(()) => {
+                self.messages.push(Message {
+                    role: Role::System,
+                    content: format!("Provider set to '{name}'."),
+                });
+                Some(ChatAction::RefreshModels)
+            }
+            Err(err) => {
+                self.messages.push(Message {
+                    role: Role::Error,
+                    content: err,
+                });
+                None
+            }
+        }
+    }
+
+    fn handle_api_key_command(&mut self, api_key: &str) -> Option<ChatAction> {
+        // The key itself is never echoed into the scrollback.
+        self.messages.push(Message {
+            role: Role::User,
+            content: "/api-key ********".to_owned(),
+        });
+        let api_key = api_key.trim();
+        let reply = if api_key.is_empty() {
+            Message {
+                role: Role::System,
+                content: "Usage: /api-key <api-key>".to_owned(),
+            }
+        } else {
+            match self.config.set_api_key(api_key) {
+                Ok(()) => Message {
+                    role: Role::System,
+                    content: format!("API key set for provider '{}'.", self.config.provider_name()),
+                },
+                Err(err) => Message {
+                    role: Role::Error,
+                    content: err,
+                },
+            }
+        };
+        self.messages.push(reply);
+        None
+    }
+
     fn handle_help_command(&mut self, text: &str) -> Option<ChatAction> {
-        let reply = "Commands: /help (this message), /whoami (show connection info), /explain <query> (explain query plan), /analyze <query> (analyze query plan and schemas), /relkind <schema.relation> (get relation kind). \
+        let reply = "Commands: /help (this message), /api-key <key> (set API key of current provider), /provider <name> (switch AI provider), /whoami (show connection info), /explain <query> (explain query plan), /analyze <query> (analyze query plan and schemas), /relkind <schema.relation> (get relation kind). \
                  Anything else is sent to PostgreSQL as SQL.";
         self.messages.push(Message {
             role: Role::User,

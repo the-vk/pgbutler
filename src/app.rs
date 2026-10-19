@@ -135,6 +135,7 @@ impl App {
                                 ChatAction::RelKind(schema, relation) => {
                                     self.spawn_relkind(schema, relation)
                                 }
+                                ChatAction::RefreshModels => self.spawn_fetch_models(),
                             }
                         }
                     }
@@ -159,7 +160,7 @@ impl App {
                             if let Err(error) = self.config.save_connection(&conn) {
                                 log::warn!("Failed to save connection profile: {error}");
                             }
-                            self.screen = Screen::Chat(ChatScreen::new(*conn, client));
+                            self.screen = Screen::Chat(ChatScreen::new(*conn, client, Arc::clone(&self.config)));
                             self.spawn_fetch_models();
                         }
                         Err(err) => setup.error = Some(err),
