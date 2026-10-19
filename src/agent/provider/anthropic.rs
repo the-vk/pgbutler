@@ -8,6 +8,14 @@ use super::AgentProvider;
 use crate::agent::AgentError;
 use crate::config::AnthropicConfig;
 
+fn max_tokens_for_model(model: &str) -> anthropic::MaxTokens {
+    if anthropic::ANTHROPIC.default_max_tokens(model).is_some() {
+        anthropic::MaxTokens::ByModel
+    } else {
+        anthropic::MaxTokens::Fixed(128_000)
+    }
+}
+
 pub struct AnthropicProvider {
     client: anthropic::Anthropic,
     model: String,
@@ -23,12 +31,14 @@ impl AnthropicProvider {
                     "Anthropic api_key is not set (config or ANTHROPIC_API_KEY)".into(),
                 )
             })?;
-        let client = anthropic::AnthropicConfig::new(api_key)
-            .with_base_url(config.base_url.clone().unwrap())
-            .client();
+        let model = config.model.clone().unwrap();
+        let mut provider_config = anthropic::AnthropicConfig::new(api_key)
+            .with_base_url(config.base_url.clone().unwrap());
+        provider_config.dialect.quirks.max_tokens = max_tokens_for_model(&model);
+        let client = provider_config.client();
         Ok(Self {
             client,
-            model: config.model.clone().unwrap(),
+            model,
         })
     }
 }
@@ -55,5 +65,27 @@ impl AgentProvider for AnthropicProvider {
 
     fn agent_builder(&self, model: &str) -> Result<AgentBuilder, AgentError> {
         Ok(AgentBuilder::new(self.client.completion(model)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::max_tokens_for_model;
+    use rig::providers::anthropic::MaxTokens;
+
+    #[test]
+    fn uses_rig_model_limit_when_available() {
+        assert_eq!(
+            max_tokens_for_model("claude-haiku-4-5"),
+            MaxTokens::ByModel
+        );
+    }
+
+    #[test]
+    fn falls_back_to_128k_for_unknown_model_limit() {
+        assert_eq!(
+            max_tokens_for_model("claude-haiku-5-5"),
+            MaxTokens::Fixed(128_000)
+        );
     }
 }
