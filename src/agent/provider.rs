@@ -9,9 +9,13 @@ use crate::config::{Config, ProviderConfig};
 
 use super::AgentError;
 
+mod anthropic;
 mod ollama;
+mod openai;
 
+use anthropic::AnthropicProvider;
 use ollama::OllamaProvider;
+use openai::OpenAiProvider;
 
 /// A pluggable LLM backend.
 pub trait AgentProvider: Send + Sync {
@@ -35,6 +39,8 @@ pub fn build(config: &Config) -> Result<Arc<dyn AgentProvider>, AgentError> {
         ProviderConfig::Ollama(ollama_config) => {
             Ok(Arc::new(OllamaProvider::new(&ollama_config)?))
         }
+        ProviderConfig::Anthropic(cfg) => Ok(Arc::new(AnthropicProvider::new(&cfg)?)),
+        ProviderConfig::OpenAi(cfg) => Ok(Arc::new(OpenAiProvider::new(&cfg)?)),
     }
 }
 

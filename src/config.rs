@@ -22,6 +22,78 @@ pub use sslmode::SslMode;
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderConfig {
     Ollama(OllamaConfig),
+    Anthropic(AnthropicConfig),
+    #[serde(rename = "openai")]
+    OpenAi(OpenAiConfig),
+}
+
+const DEFAULT_ANTHROPIC_URL: &str = "https://api.anthropic.com";
+const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-5";
+const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/v1";
+const DEFAULT_OPENAI_MODEL: &str = "gpt-5";
+
+/// Anthropic settings. `api_key` falls back to `ANTHROPIC_API_KEY`.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct AnthropicConfig {
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+impl Default for AnthropicConfig {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            base_url: Some(DEFAULT_ANTHROPIC_URL.to_owned()),
+            model: Some(DEFAULT_ANTHROPIC_MODEL.to_owned()),
+        }
+    }
+}
+
+impl AnthropicConfig {
+    fn with_defaults(&self) -> Self {
+        let defaults = Self::default();
+        Self {
+            api_key: self.api_key.clone(),
+            base_url: self.base_url.clone().or(defaults.base_url),
+            model: self.model.clone().or(defaults.model),
+        }
+    }
+}
+
+/// OpenAI settings. `api_key` falls back to `OPENAI_API_KEY`.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct OpenAiConfig {
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+impl Default for OpenAiConfig {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            base_url: Some(DEFAULT_OPENAI_URL.to_owned()),
+            model: Some(DEFAULT_OPENAI_MODEL.to_owned()),
+        }
+    }
+}
+
+impl OpenAiConfig {
+    fn with_defaults(&self) -> Self {
+        let defaults = Self::default();
+        Self {
+            api_key: self.api_key.clone(),
+            base_url: self.base_url.clone().or(defaults.base_url),
+            model: self.model.clone().or(defaults.model),
+        }
+    }
 }
 
 const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
@@ -84,13 +156,21 @@ impl AppSection {
 #[serde(default)]
 struct Providers {
     ollama: Option<OllamaConfig>,
+    anthropic: Option<AnthropicConfig>,
+    openai: Option<OpenAiConfig>,
 }
 
 impl Providers {
     fn select(&self, name: &str) -> Result<ProviderConfig, String> {
         match name {
             "ollama" => Ok(ProviderConfig::Ollama(
-                self.ollama.clone().ok_or("provider 'ollama' selectred but no [provider.ollama] section is set")?,
+                self.ollama.clone().ok_or("provider 'ollama' selected but no [provider.ollama] section is set")?,
+            )),
+            "anthropic" => Ok(ProviderConfig::Anthropic(
+                self.anthropic.clone().ok_or("provider 'anthropic' selected but no [provider.anthropic] section is set")?,
+            )),
+            "openai" => Ok(ProviderConfig::OpenAi(
+                self.openai.clone().ok_or("provider 'openai' selected but no [provider.openai] section is set")?,
             )),
             other => Err(format!("unknown provider '{other}'"))
         }
@@ -104,6 +184,8 @@ impl Providers {
                     .map(OllamaConfig::with_defaults)
                     .unwrap_or_default(),
             ),
+            anthropic: self.anthropic.as_ref().map(AnthropicConfig::with_defaults),
+            openai: self.openai.as_ref().map(OpenAiConfig::with_defaults),
         }
     }
 }
@@ -112,6 +194,8 @@ impl Default for Providers {
     fn default() -> Self {
         Self {
             ollama: Some(OllamaConfig::default()),
+            anthropic: None,
+            openai: None,
         }
     }
 }
@@ -426,12 +510,16 @@ mod tests {
                     model: Some("qwen3".to_string()),
                     num_ctx: None,
                 }),
+                ..Providers::default()
             },
             ..Config::default()
         };
 
         let normalized = config.with_defaults();
-        let ProviderConfig::Ollama(ollama) = normalized.select_provider().expect("provider");
+        let ProviderConfig::Ollama(ollama) = normalized.select_provider().expect("provider")
+        else {
+            panic!("expected ollama provider");
+        };
         assert_eq!(ollama.base_url.as_deref(), Some(DEFAULT_OLLAMA_URL));
         assert_eq!(ollama.model.as_deref(), Some("qwen3"));
         assert_eq!(ollama.num_ctx, Some(DEFAULT_OLLAMA_NUM_CTX));
