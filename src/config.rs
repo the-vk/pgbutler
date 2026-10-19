@@ -35,8 +35,13 @@ const DEFAULT_OPENAI_MODEL: &str = "gpt-5";
 /// Anthropic settings. `api_key` falls back to `ANTHROPIC_API_KEY`.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct AnthropicConfig {
-    #[serde(default)]
-    pub api_key: Option<String>,
+    /// Encrypted at rest; empty means unset.
+    #[serde(
+        default,
+        serialize_with = "serialize_password",
+        deserialize_with = "deserialize_password"
+    )]
+    pub api_key: String,
     #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default)]
@@ -46,7 +51,7 @@ pub struct AnthropicConfig {
 impl Default for AnthropicConfig {
     fn default() -> Self {
         Self {
-            api_key: None,
+            api_key: String::new(),
             base_url: Some(DEFAULT_ANTHROPIC_URL.to_owned()),
             model: Some(DEFAULT_ANTHROPIC_MODEL.to_owned()),
         }
@@ -67,8 +72,13 @@ impl AnthropicConfig {
 /// OpenAI settings. `api_key` falls back to `OPENAI_API_KEY`.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct OpenAiConfig {
-    #[serde(default)]
-    pub api_key: Option<String>,
+    /// Encrypted at rest; empty means unset.
+    #[serde(
+        default,
+        serialize_with = "serialize_password",
+        deserialize_with = "deserialize_password"
+    )]
+    pub api_key: String,
     #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default)]
@@ -78,7 +88,7 @@ pub struct OpenAiConfig {
 impl Default for OpenAiConfig {
     fn default() -> Self {
         Self {
-            api_key: None,
+            api_key: String::new(),
             base_url: Some(DEFAULT_OPENAI_URL.to_owned()),
             model: Some(DEFAULT_OPENAI_MODEL.to_owned()),
         }

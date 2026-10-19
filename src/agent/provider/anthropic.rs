@@ -16,9 +16,7 @@ pub struct AnthropicProvider {
 
 impl AnthropicProvider {
     pub fn new(config: &AnthropicConfig) -> Result<Self, AgentError> {
-        let api_key = config
-            .api_key
-            .clone()
+        let api_key = Some(config.api_key.clone())
             .filter(|key| !key.trim().is_empty())
             .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
             .ok_or_else(|| {

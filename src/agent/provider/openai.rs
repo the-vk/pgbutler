@@ -16,9 +16,7 @@ pub struct OpenAiProvider {
 
 impl OpenAiProvider {
     pub fn new(config: &OpenAiConfig) -> Result<Self, AgentError> {
-        let api_key = config
-            .api_key
-            .clone()
+        let api_key = Some(config.api_key.clone())
             .filter(|key| !key.trim().is_empty())
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .ok_or_else(|| {
