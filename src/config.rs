@@ -28,7 +28,7 @@ pub enum ProviderConfig {
 }
 
 const DEFAULT_ANTHROPIC_URL: &str = "https://api.anthropic.com";
-const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-5";
+const DEFAULT_ANTHROPIC_MODEL: &str = rig::providers::anthropic::CLAUDE_SONNET_5_5;
 const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5";
 

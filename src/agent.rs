@@ -8,8 +8,8 @@ mod tools;
 use std::sync::Arc;
 
 use futures::StreamExt;
-use rig::agent::{AgentHook, HookContext, ToolResultAction, ToolResultEvent};
-use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
+use rig::agent::{AgentHook, HookContext, OutcomeAction, OutcomeEvent};
+use rig::streaming::{Item, StreamEvent};
 use tokio_postgres::Client;
 
 pub use crate::agent::provider::{AgentProvider, build};
@@ -39,21 +39,23 @@ struct TruncatingToolResultHook {
 }
 
 impl AgentHook for TruncatingToolResultHook {
-    async fn on_tool_result(
-        &self,
-        _ctx: &HookContext,
-        event: ToolResultEvent<'_>,
-    ) -> ToolResultAction {
-        match event.presentation.as_text() {
+    async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        match event
+            .tool_result()
+            .and_then(|result| result.output().as_text())
+        {
             Some(text) if text.len() > self.max_chars => {
                 let truncated: String = text.chars().take(self.max_chars).collect();
-                ToolResultAction::rewrite(format!(
-                    "{truncated}\n... [truncated {} of {} characters to conserve context]",
-                    text.len() - truncated.len(),
-                    text.len()
-                ))
+                OutcomeAction::rewrite_tool_result(
+                    &event,
+                    format!(
+                        "{truncated}\n... [truncated {} of {} characters to conserve context]",
+                        text.len() - truncated.len(),
+                        text.len()
+                    ),
+                )
             }
-            _ => ToolResultAction::keep(),
+            _ => OutcomeAction::proceed(),
         }
     }
 }
@@ -169,13 +171,13 @@ pub async fn analyze_query_streaming(
         "
     );
 
-    let mut stream = agent.stream_prompt(&prompt).await;
+    let mut stream = agent.prompt(&prompt).stream();
     let mut final_response = None;
     while let Some(item) = stream.next().await {
         match item {
-            Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
-                StreamedAssistantContent::Text(text),
-            )) => on_progress(AnalysisProgress::Text(text.text)),
+            Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(Item::Event(
+                StreamEvent::Text { text, .. },
+            ))) => on_progress(AnalysisProgress::Text(text)),
             Ok(rig::agent::MultiTurnStreamItem::ModelTurnRetried { .. }) => {
                 on_progress(AnalysisProgress::Reset);
             }
@@ -191,9 +193,9 @@ pub async fn analyze_query_streaming(
         AgentError::Streaming("stream ended without a final response".to_string())
     })?;
     Ok(Response {
-        answer: response.output,
-        input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens,
+        answer: response.output(),
+        input_tokens: response.usage.input_tokens.unwrap_or_default(),
+        output_tokens: response.usage.output_tokens.unwrap_or_default(),
         model_requests: response.completion_calls.len(),
     })
 }

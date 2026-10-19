@@ -9,5 +9,7 @@ pub use crate::agent::tools::rel_kind::GetRelKindTool;
 pub use crate::agent::tools::table_indexes::GetTableIndexesTool;
 #[cfg(test)]
 pub use crate::agent::tools::table_indexes::TableIndexesArgs;
-pub use crate::agent::tools::table_schema::{GetTableSchemaTool, TableSchemaArgs};
+pub use crate::agent::tools::table_schema::GetTableSchemaTool;
+#[cfg(test)]
+pub use crate::agent::tools::table_schema::TableSchemaArgs;
 pub use crate::agent::tools::view_def::GetViewDefTool;
