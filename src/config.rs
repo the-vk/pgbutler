@@ -242,6 +242,14 @@ impl Config {
         self.providers().select(&self.provider_name())
     }
 
+    pub fn provider_model(&self) -> Result<Option<String>, String> {
+        Ok(match self.select_provider()? {
+            ProviderConfig::Ollama(config) => config.model,
+            ProviderConfig::Anthropic(config) => config.model,
+            ProviderConfig::OpenAi(config) => config.model,
+        })
+    }
+
     fn providers(&self) -> std::sync::RwLockReadGuard<'_, Providers> {
         self.provider
             .read()
@@ -259,6 +267,31 @@ impl Config {
             "anthropic" => providers.anthropic.as_mut().map(|c| c.api_key = api_key.to_owned()),
             "openai" => providers.openai.as_mut().map(|c| c.api_key = api_key.to_owned()),
             "ollama" => return Err("provider 'ollama' does not use an API key".into()),
+            other => return Err(format!("unknown provider '{other}'")),
+        }
+        .ok_or_else(|| format!("no [provider.{name}] section is set"))
+    }
+
+    /// Set the model of the currently selected provider.
+    pub fn set_provider_model(&self, model: &str) -> Result<(), String> {
+        let name = self.provider_name();
+        let mut providers = self
+            .provider
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match name.as_str() {
+            "ollama" => providers
+                .ollama
+                .as_mut()
+                .map(|c| c.model = Some(model.to_owned())),
+            "anthropic" => providers
+                .anthropic
+                .as_mut()
+                .map(|c| c.model = Some(model.to_owned())),
+            "openai" => providers
+                .openai
+                .as_mut()
+                .map(|c| c.model = Some(model.to_owned())),
             other => return Err(format!("unknown provider '{other}'")),
         }
         .ok_or_else(|| format!("no [provider.{name}] section is set"))
@@ -579,6 +612,34 @@ mod tests {
         assert_eq!(ollama.model.as_deref(), Some("qwen3"));
         assert_eq!(ollama.num_ctx, Some(DEFAULT_OLLAMA_NUM_CTX));
         assert!(config.providers().ollama.as_ref().unwrap().base_url.is_none());
+    }
+
+    #[test]
+    fn setting_model_updates_only_the_active_provider() {
+        let config = Config::default();
+
+        config
+            .set_provider_model("qwen3")
+            .expect("set Ollama model");
+        assert_eq!(
+            config.provider_model().expect("Ollama model").as_deref(),
+            Some("qwen3")
+        );
+
+        config.set_provider("anthropic").expect("select Anthropic");
+        config
+            .set_provider_model("claude-custom")
+            .expect("set Anthropic model");
+        assert_eq!(
+            config.provider_model().expect("Anthropic model").as_deref(),
+            Some("claude-custom")
+        );
+
+        config.set_provider("ollama").expect("select Ollama");
+        assert_eq!(
+            config.provider_model().expect("Ollama model").as_deref(),
+            Some("qwen3")
+        );
     }
 
     #[test]

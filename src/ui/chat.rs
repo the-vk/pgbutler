@@ -51,10 +51,8 @@ pub struct ChatScreen {
     analysis_preview: Option<String>,
     usage_summary: Option<String>,
     scroll: u16,
-    /// Models reported by the local Ollama daemon, fetched on screen start.
+    /// Models reported by the active provider, fetched on screen start.
     pub models: Vec<String>,
-    /// Index into `models` of the model currently in use, if any are available.
-    pub selected_model: Option<usize>,
 }
 
 impl ChatScreen {
@@ -79,21 +77,29 @@ impl ChatScreen {
             usage_summary: None,
             scroll: 0,
             models: Vec::new(),
-            selected_model: None,
         }
     }
 
     /// The model currently selected for AI-assisted commands, if any.
-    pub fn current_model(&self) -> Option<&str> {
-        self.selected_model
-            .and_then(|i| self.models.get(i))
-            .map(String::as_str)
+    pub fn current_model(&self) -> Option<String> {
+        self.config.provider_model().ok().flatten()
     }
 
-    /// Store the models available from Ollama and select the first one.
+    /// Store the models available from the active provider.
     pub fn on_models_result(&mut self, models: Vec<String>) {
         self.busy = false;
-        self.selected_model = if models.is_empty() { None } else { Some(0) };
+        let configured_model = self.config.provider_model().ok().flatten();
+        if !models.is_empty()
+            && !configured_model
+                .as_ref()
+                .is_some_and(|configured| models.iter().any(|model| model == configured))
+            && let Err(error) = self.config.set_provider_model(&models[0])
+        {
+            self.messages.push(Message {
+                role: Role::Error,
+                content: error,
+            });
+        }
         self.models = models;
     }
 
@@ -102,10 +108,16 @@ impl ChatScreen {
         if self.models.is_empty() {
             return;
         }
-        let next = self
-            .selected_model
-            .map_or(0, |i| (i + 1) % self.models.len());
-        self.selected_model = Some(next);
+        let current_index = self
+            .current_model()
+            .and_then(|current| self.models.iter().position(|model| model == &current));
+        let next_index = current_index.map_or(0, |index| (index + 1) % self.models.len());
+        if let Err(error) = self.config.set_provider_model(&self.models[next_index]) {
+            self.messages.push(Message {
+                role: Role::Error,
+                content: error,
+            });
+        }
     }
 
     /// Handle a key press. Returns `Some(action)` when a query or command should
@@ -471,7 +483,8 @@ impl ChatScreen {
             .split(area);
 
         let provider_label = self.config.provider_name();
-        let model_label = self.current_model().unwrap_or("<no models available>");
+        let current_model = self.current_model();
+        let model_label = current_model.as_deref().unwrap_or("<no models available>");
         draw_banner(
             frame,
             chunks[0],

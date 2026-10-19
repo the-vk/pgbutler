@@ -249,7 +249,7 @@ impl App {
         let config = Arc::clone(&self.config);
         if let Screen::Chat(chat) = &self.screen {
             let client = Arc::clone(&chat.client);
-            let model = chat.current_model().map(str::to_owned);
+            let model = chat.current_model();
             tokio::spawn(async move {
                 let progress_tx = tx.clone();
                 let result = async {
