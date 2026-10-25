@@ -52,6 +52,7 @@ impl AgentProvider for OpenAiProvider {
     }
 
     fn agent_builder(&self, model: &str) -> Result<AgentBuilder, AgentError> {
-        Ok(AgentBuilder::new(self.client.chat(model)))
+        // Chat Completions rejects function tools combined with reasoning_effort on newer models.
+        Ok(AgentBuilder::new(self.client.completion(model)))
     }
 }
