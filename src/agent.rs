@@ -99,7 +99,9 @@ pub enum AnalysisProgress {
 
 /// List the models offered by the configured provider.
 pub async fn list_models(config: &Config) -> Result<Vec<String>, AgentError> {
-    provider::build(config)?.list_models().await
+    let mut models = provider::build(config)?.list_models().await?;
+    models.sort();
+    Ok(models)
 }
 
 /// Check that the configured provider is usable: `true` if no API key is

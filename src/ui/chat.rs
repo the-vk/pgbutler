@@ -211,6 +211,7 @@ impl ChatScreen {
             "/relkind" => self.handle_relkind_command(text, query),
             "/provider" => self.handle_provider_command(text, query),
             "/api-key" => self.handle_api_key_command(query),
+            "/model" => self.handle_model_command(text, query),
             "/query" => Some(ChatAction::Query(query.to_owned())),
             "/help" => self.handle_help_command(text),
             "/whoami" => self.handle_whoami_command(text),
@@ -319,6 +320,54 @@ impl ChatScreen {
         }
     }
 
+    fn handle_model_command(&mut self, text: &str, name: &str) -> Option<ChatAction> {
+        self.messages.push(Message {
+            role: Role::User,
+            content: text.to_owned(),
+        });
+        let reply = match name.trim() {
+            "" => {
+            let current = self.current_model().unwrap_or_else(|| "<none>".to_owned());
+            let width = crossterm::terminal::size()
+                .map_or(80, |(columns, _)| usize::from(columns))
+                .saturating_sub(8);
+            let mut content = format!("Current model: {current}");
+            if !self.models.is_empty() {
+                content.push('\n');
+                content.push_str(&format_columns(&self.models, width));
+            }
+            Message {
+                role: Role::System,
+                content,
+            }
+            }
+            name => {
+                if self.models.iter().any(|model| model == name) {
+                    match self.config.set_provider_model(name) {
+                        Ok(()) => Message {
+                            role: Role::System,
+                            content: format!("Model set to '{name}'."),
+                        },
+                        Err(err) => Message {
+                            role: Role::Error,
+                            content: err,
+                        },
+                    }
+                } else {
+                    Message {
+                        role: Role::Error,
+                        content: format!(
+                            "Model '{name}' is not available from provider '{}'.",
+                            self.config.provider_name()
+                        ),
+                    }
+                }
+            }
+        };
+        self.messages.push(reply);
+        None
+    }
+
     fn handle_api_key_command(&mut self, api_key: &str) -> Option<ChatAction> {
         // The key itself is never echoed into the scrollback.
         self.messages.push(Message {
@@ -352,7 +401,7 @@ impl ChatScreen {
     }
 
     fn handle_help_command(&mut self, text: &str) -> Option<ChatAction> {
-        let reply = "Commands: /help (this message), /api-key <key> (set API key of current provider), /provider <name> (switch AI provider), /whoami (show connection info), /explain <query> (explain query plan), /analyze <query> (analyze query plan and schemas), /relkind <schema.relation> (get relation kind). \
+        let reply = "Commands: /help (this message), /api-key <key> (set API key of current provider), /model [name] (show, list or switch model), /provider <name> (switch AI provider), /whoami (show connection info), /explain <query> (explain query plan), /analyze <query> (analyze query plan and schemas), /relkind <schema.relation> (get relation kind). \
                  Anything else is sent to PostgreSQL as SQL.";
         self.messages.push(Message {
             role: Role::User,
@@ -613,6 +662,29 @@ impl ChatScreen {
             }
         }
     }
+}
+
+/// Lay out names in column-major order, fitting within `width` characters.
+fn format_columns(names: &[String], width: usize) -> String {
+    let widths: Vec<usize> = names.iter().map(|name| name.chars().count()).collect();
+    let cell = widths.iter().copied().max().unwrap_or(0) + 2;
+    let columns = (width / cell).clamp(1, names.len());
+    let rows = names.len().div_ceil(columns);
+    let mut lines = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let mut line = String::new();
+        for column in 0..columns {
+            let index = column * rows + row;
+            if let Some(name) = names.get(index) {
+                line.push_str(name);
+                if (column + 1) * rows + row < names.len() {
+                    line.push_str(&" ".repeat(cell - widths[index]));
+                }
+            }
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
 }
 
 fn previous_char_boundary(text: &str, cursor: usize) -> usize {
