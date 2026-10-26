@@ -15,8 +15,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
+  test:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      previous_tag: ${{ steps.version.outputs.previous_tag }}
+      sha: ${{ steps.commit.outputs.sha }}
 
     steps:
       - uses: actions/checkout@v7
@@ -99,6 +103,7 @@ jobs:
         run: cargo test --verbose
 
       - name: Update version and commit
+        id: commit
         env:
           VERSION: ${{ inputs.version }}
           TAG: ${{ steps.version.outputs.tag }}
@@ -129,19 +134,85 @@ jobs:
             git commit -m "chore: release ${TAG}"
             git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: macos-latest
+            target: macos
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: linux
+            archive: tar.gz
+          - os: windows-latest
+            target: windows
+            archive: zip
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.test.outputs.sha }}
+
+      - name: Install OpenSSL
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          vcpkg install openssl:x64-windows-static-md
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+          "VCPKGRS_TRIPLET=x64-windows-static-md" >> $env:GITHUB_ENV
 
       - name: Build release binary
         run: cargo build --release --locked --verbose
 
+      - name: Archive binary (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        env:
+          VERSION: ${{ inputs.version }}
+        run: tar -czf "pgbutler-v${VERSION}-${{ matrix.target }}.tar.gz" -C target/release pgbutler
+
+      - name: Archive binary (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: Compress-Archive -Path target/release/pgbutler.exe -DestinationPath "pgbutler-v$env:VERSION-${{ matrix.target }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pgbutler-${{ matrix.target }}
+          path: pgbutler-v${{ inputs.version }}-${{ matrix.target }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    needs: [test, build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.test.outputs.sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: pgbutler-*
+          merge-multiple: true
+
       - name: Prepare release notes
         env:
-          PREVIOUS_TAG: ${{ steps.version.outputs.previous_tag }}
+          PREVIOUS_TAG: ${{ needs.test.outputs.previous_tag }}
         run: |
           set -euo pipefail
           if [[ -n "$PREVIOUS_TAG" ]]; then
-            git log --pretty=format:'- %s' --extended-regexp --invert-grep --grep='^refactor(\([^)]*\))?!?:' "${PREVIOUS_TAG}..${GITHUB_SHA}" > release-notes.md
+            git log --pretty=format:'- %s' --extended-regexp --invert-grep --grep='^refactor(\([^)]*\))?!?:' "${PREVIOUS_TAG}..HEAD" > release-notes.md
           else
-            git log --pretty=format:'- %s' --extended-regexp --invert-grep --grep='^refactor(\([^)]*\))?!?:' "$GITHUB_SHA" > release-notes.md
+            git log --pretty=format:'- %s' --extended-regexp --invert-grep --grep='^refactor(\([^)]*\))?!?:' HEAD > release-notes.md
           fi
           if [[ ! -s release-notes.md ]]; then
             if [[ -n "$PREVIOUS_TAG" ]]; then
@@ -153,20 +224,16 @@ jobs:
 
       - name: Tag release
         env:
-          TAG: ${{ steps.version.outputs.tag }}
+          TAG: ${{ needs.test.outputs.tag }}
         run: |
           set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$TAG" -m "Release $TAG"
           git push origin "$TAG"
-
-      - name: Archive binary
-        env:
-          VERSION: ${{ inputs.version }}
-        run: tar -czf "pgbutler-v${VERSION}.tar.gz" -C target/release pgbutler
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
-          VERSION: ${{ inputs.version }}
-        run: gh release create "$TAG" "pgbutler-v${VERSION}.tar.gz" --title "pgbutler $TAG" --notes-file release-notes.md
+          TAG: ${{ needs.test.outputs.tag }}
+        run: gh release create "$TAG" dist/* --title "pgbutler $TAG" --notes-file release-notes.md
