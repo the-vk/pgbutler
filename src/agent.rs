@@ -16,7 +16,7 @@ pub use crate::agent::provider::{AgentProvider, build};
 use crate::agent::tools::{
     GetQueryPlanTool, GetRelKindTool, GetTableIndexesTool, GetTableSchemaTool, GetViewDefTool,
 };
-use crate::config::Config;
+use crate::config::ProviderConfig;
 
 /// Rig defaults to a budget of a single model call; raise it so the agent can
 /// actually invoke tools and react to their results before answering.
@@ -97,23 +97,16 @@ pub enum AnalysisProgress {
     Reset,
 }
 
-/// List the models offered by the configured provider.
-pub async fn list_models(config: &Config) -> Result<Vec<String>, AgentError> {
+/// List the models offered by the provider described by `config`.
+pub async fn list_models(config: &ProviderConfig) -> Result<Vec<String>, AgentError> {
     let mut models = provider::build(config)?.list_models().await?;
     models.sort();
     Ok(models)
 }
 
-/// List the models offered by an arbitrary provider config (e.g. unsaved edits).
-pub async fn list_models_for(config: &crate::config::ProviderConfig) -> Result<Vec<String>, AgentError> {
-    let mut models = provider::build_for(config)?.list_models().await?;
-    models.sort();
-    Ok(models)
-}
-
-/// Check that the configured provider is usable: `true` if no API key is
+/// Check that the provider is usable: `true` if no API key is
 /// needed or the key is present and accepted, `false` if it is missing or invalid.
-pub async fn is_provider_ready(config: &Config) -> bool {
+pub async fn is_provider_ready(config: &ProviderConfig) -> bool {
     match provider::build(config) {
         Ok(provider) => provider.is_ready().await,
         Err(_) => false,

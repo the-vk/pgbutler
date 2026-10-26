@@ -262,7 +262,10 @@ impl App {
             tokio::spawn(async move {
                 let progress_tx = tx.clone();
                 let result = async {
-                    let provider = agent::build(&config)?;
+                    let provider_config = config
+                        .select_provider()
+                        .map_err(agent::AgentError::Config)?;
+                    let provider = agent::build(&provider_config)?;
                     let model = model.as_deref();
                     log::info!(model = model.unwrap_or_else(|| provider.default_model()); "Selected model");
                     agent::analyze_query_streaming(
@@ -300,13 +303,16 @@ impl App {
         let tx = self.events_tx.clone();
         let config = Arc::clone(&self.config);
         tokio::spawn(async move {
-            let ready = agent::is_provider_ready(&config).await;
-            let _ = tx.send(AppEvent::ProviderReady(ready));
-            let result = if ready {
-                agent::list_models(&config).await.map_err(|e| e.to_string())
-            } else {
-                Ok(Vec::new())
+            let (ready, result) = match config.select_provider() {
+                Ok(provider_config) if agent::is_provider_ready(&provider_config).await => (
+                    true,
+                    agent::list_models(&provider_config)
+                        .await
+                        .map_err(|e| e.to_string()),
+                ),
+                _ => (false, Ok(Vec::new())),
             };
+            let _ = tx.send(AppEvent::ProviderReady(ready));
             let _ = tx.send(AppEvent::ModelsResult(result));
         });
     }
@@ -314,7 +320,7 @@ impl App {
     fn spawn_provider_models(&self, name: String, config: config::ProviderConfig) {
         let tx = self.events_tx.clone();
         tokio::spawn(async move {
-            let result = agent::list_models_for(&config)
+            let result = agent::list_models(&config)
                 .await
                 .map_err(|e| e.to_string());
             let _ = tx.send(AppEvent::ProviderModelsResult(name, result));
@@ -325,7 +331,12 @@ impl App {
         let tx = self.events_tx.clone();
         let config = Arc::clone(&self.config);
         tokio::spawn(async move {
-            let result = agent::list_models(&config).await.map_err(|e| e.to_string());
+            let result = match config.select_provider() {
+                Ok(provider_config) => agent::list_models(&provider_config)
+                    .await
+                    .map_err(|e| e.to_string()),
+                Err(err) => Err(err),
+            };
             let _ = tx.send(AppEvent::ModelsResult(result));
         });
     }

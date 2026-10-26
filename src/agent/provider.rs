@@ -5,7 +5,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use rig::agent::AgentBuilder;
 
-use crate::config::{Config, ProviderConfig};
+use crate::config::ProviderConfig;
 
 use super::AgentError;
 
@@ -38,12 +38,7 @@ pub trait AgentProvider: Send + Sync {
     fn agent_builder(&self, model: &str) -> Result<AgentBuilder, AgentError>;
 }
 
-pub fn build(config: &Config) -> Result<Arc<dyn AgentProvider>, AgentError> {
-    let provider_config = config.select_provider().map_err(|v| AgentError::Config(v))?;
-    build_for(&provider_config)
-}
-
-pub fn build_for(provider_config: &ProviderConfig) -> Result<Arc<dyn AgentProvider>, AgentError> {
+pub fn build(provider_config: &ProviderConfig) -> Result<Arc<dyn AgentProvider>, AgentError> {
     match provider_config {
         ProviderConfig::Ollama(cfg) => Ok(Arc::new(OllamaProvider::new(cfg)?)),
         ProviderConfig::Anthropic(cfg) => Ok(Arc::new(AnthropicProvider::new(cfg)?)),
