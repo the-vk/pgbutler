@@ -11,11 +11,21 @@ env:
 
 jobs:
   build:
-
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
+    - name: Install OpenSSL
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        vcpkg install openssl:x64-windows-static-md
+        "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+        "VCPKGRS_TRIPLET=x64-windows-static-md" >> $env:GITHUB_ENV
     - name: Build
       run: cargo build --verbose
     - name: Run tests
