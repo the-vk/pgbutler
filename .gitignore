@@ -1,5 +1,6 @@
 /.github
 /.vscode
 /db
+/dist
 /docker
 /target

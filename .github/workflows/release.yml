@@ -236,4 +236,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.test.outputs.tag }}
-        run: gh release create "$TAG" dist/* --title "pgbutler $TAG" --notes-file release-notes.md
+        run: |
+          gh release create "$TAG" dist/* --title "pgbutler $TAG" --notes-file release-notes.md
+          rm release-notes.md
+
+      - name: Publish crate to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
