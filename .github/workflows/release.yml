@@ -139,9 +139,9 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -n "$PREVIOUS_TAG" ]]; then
-            git log --pretty=format:'- %s' "${PREVIOUS_TAG}..${GITHUB_SHA}" > release-notes.md
+            git log --pretty=format:'- %s' --extended-regexp --invert-grep --grep='^refactor(\([^)]*\))?!?:' "${PREVIOUS_TAG}..${GITHUB_SHA}" > release-notes.md
           else
-            git log --pretty=format:'- %s' "$GITHUB_SHA" > release-notes.md
+            git log --pretty=format:'- %s' --extended-regexp --invert-grep --grep='^refactor(\([^)]*\))?!?:' "$GITHUB_SHA" > release-notes.md
           fi
           if [[ ! -s release-notes.md ]]; then
             if [[ -n "$PREVIOUS_TAG" ]]; then
