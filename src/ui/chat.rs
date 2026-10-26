@@ -13,10 +13,11 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use tokio_postgres::Client;
 
 use crate::agent::{AnalysisProgress, Response};
-use crate::config::{Config, Connection};
+use crate::config::{Config, Connection, ProviderConfig};
 use crate::db::{QueryOutcome, RelKind};
 use crate::theme;
 use crate::ui::draw_banner;
+use crate::ui::settings::{SettingsEvent, SettingsScreen};
 
 pub enum Role {
     User,
@@ -38,6 +39,8 @@ pub enum ChatAction {
     RelKind(String, String),
     /// Provider changed; reload its model list.
     RefreshModels,
+    /// Fetch models for a provider config edited in Settings.
+    ListProviderModels(String, ProviderConfig),
 }
 
 pub struct ChatScreen {
@@ -53,6 +56,8 @@ pub struct ChatScreen {
     scroll: u16,
     /// Models reported by the active provider, fetched on screen start.
     pub models: Vec<String>,
+    /// Overlay screen; the chat state above is kept intact while it is open.
+    settings: Option<SettingsScreen>,
 }
 
 impl ChatScreen {
@@ -77,6 +82,7 @@ impl ChatScreen {
             usage_summary: None,
             scroll: 0,
             models: Vec::new(),
+            settings: None,
         }
     }
 
@@ -123,6 +129,27 @@ impl ChatScreen {
     /// Handle a key press. Returns `Some(action)` when a query or command should
     /// be executed against the database.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<ChatAction> {
+        if let Some(settings) = &mut self.settings {
+            match settings.handle_key(key) {
+                SettingsEvent::None => {}
+                SettingsEvent::LoadModels(name, config) => {
+                    return Some(ChatAction::ListProviderModels(name, config));
+                }
+                SettingsEvent::Close => {
+                    let dirty = settings.provider_dirty();
+                    self.settings = None;
+                    if dirty {
+                        self.busy = true;
+                        return Some(ChatAction::RefreshModels);
+                    }
+                }
+            }
+            return None;
+        }
+        if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.settings = Some(SettingsScreen::new(Arc::clone(&self.config)));
+            return None;
+        }
         if key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.cycle_model();
             return None;
@@ -186,7 +213,7 @@ impl ChatScreen {
     }
 
     pub fn handle_paste(&mut self, text: &str) {
-        if self.busy {
+        if self.busy || self.settings.is_some() {
             return;
         }
         insert_at_cursor(&mut self.input, &mut self.input_cursor, text);
@@ -213,6 +240,10 @@ impl ChatScreen {
             "/api-key" => self.handle_api_key_command(query),
             "/model" => self.handle_model_command(text, query),
             "/query" => Some(ChatAction::Query(query.to_owned())),
+            "/settings" => {
+                self.settings = Some(SettingsScreen::new(Arc::clone(&self.config)));
+                None
+            }
             "/help" => self.handle_help_command(text),
             "/whoami" => self.handle_whoami_command(text),
             _ => None,
@@ -401,7 +432,7 @@ impl ChatScreen {
     }
 
     fn handle_help_command(&mut self, text: &str) -> Option<ChatAction> {
-        let reply = "Commands: /help (this message), /api-key <key> (set API key of current provider), /model [name] (show, list or switch model), /provider <name> (switch AI provider), /whoami (show connection info), /explain <query> (explain query plan), /analyze <query> (analyze query plan and schemas), /relkind <schema.relation> (get relation kind). \
+        let reply = "Commands: /help (this message), /settings or Ctrl+S (open settings), /api-key <key> (set API key of current provider), /model [name] (show, list or switch model), /provider <name> (switch AI provider), /whoami (show connection info), /explain <query> (explain query plan), /analyze <query> (analyze query plan and schemas), /relkind <schema.relation> (get relation kind). \
                  Anything else is sent to PostgreSQL as SQL.";
         self.messages.push(Message {
             role: Role::User,
@@ -428,6 +459,12 @@ impl ChatScreen {
             content: reply.to_string(),
         });
         return None;
+    }
+
+    pub fn on_provider_models(&mut self, provider: &str, result: Result<Vec<String>, String>) {
+        if let Some(settings) = &mut self.settings {
+            settings.on_models(provider, result);
+        }
     }
 
     pub fn on_query_result(&mut self, result: Result<QueryOutcome, String>) {
@@ -515,6 +552,10 @@ impl ChatScreen {
     }
 
     pub fn draw(&self, frame: &mut Frame) {
+        if let Some(settings) = &self.settings {
+            settings.draw(frame);
+            return;
+        }
         let area = frame.area();
         frame.render_widget(Block::default().style(Style::default().bg(theme::BG)), area);
 

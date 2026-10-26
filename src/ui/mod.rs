@@ -1,5 +1,7 @@
 pub mod chat;
+pub mod settings;
 pub mod setup;
+pub mod widgets;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;

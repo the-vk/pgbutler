@@ -104,6 +104,13 @@ pub async fn list_models(config: &Config) -> Result<Vec<String>, AgentError> {
     Ok(models)
 }
 
+/// List the models offered by an arbitrary provider config (e.g. unsaved edits).
+pub async fn list_models_for(config: &crate::config::ProviderConfig) -> Result<Vec<String>, AgentError> {
+    let mut models = provider::build_for(config)?.list_models().await?;
+    models.sort();
+    Ok(models)
+}
+
 /// Check that the configured provider is usable: `true` if no API key is
 /// needed or the key is present and accepted, `false` if it is missing or invalid.
 pub async fn is_provider_ready(config: &Config) -> bool {

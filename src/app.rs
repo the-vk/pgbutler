@@ -34,6 +34,7 @@ pub enum AppEvent {
     AnalyzeResult(Result<agent::Response, String>),
     RelKindResult(Result<RelKind, String>),
     ModelsResult(Result<Vec<String>, String>),
+    ProviderModelsResult(String, Result<Vec<String>, String>),
     ProviderReady(bool),
 }
 
@@ -138,6 +139,9 @@ impl App {
                                     self.spawn_relkind(schema, relation)
                                 }
                                 ChatAction::RefreshModels => self.spawn_switch_provider(),
+                                ChatAction::ListProviderModels(name, config) => {
+                                    self.spawn_provider_models(name, config)
+                                }
                             }
                         }
                     }
@@ -197,6 +201,11 @@ impl App {
             AppEvent::ProviderReady(ready) => {
                 if let Screen::Chat(chat) = &mut self.screen {
                     chat.on_provider_ready(ready);
+                }
+            }
+            AppEvent::ProviderModelsResult(name, result) => {
+                if let Screen::Chat(chat) = &mut self.screen {
+                    chat.on_provider_models(&name, result);
                 }
             }
             AppEvent::ModelsResult(result) => {
@@ -299,6 +308,16 @@ impl App {
                 Ok(Vec::new())
             };
             let _ = tx.send(AppEvent::ModelsResult(result));
+        });
+    }
+
+    fn spawn_provider_models(&self, name: String, config: config::ProviderConfig) {
+        let tx = self.events_tx.clone();
+        tokio::spawn(async move {
+            let result = agent::list_models_for(&config)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppEvent::ProviderModelsResult(name, result));
         });
     }
 

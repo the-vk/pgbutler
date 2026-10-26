@@ -242,6 +242,24 @@ impl Config {
         self.providers().select(&self.provider_name())
     }
 
+    /// Config of the named provider, regardless of which one is active.
+    pub fn provider_config(&self, name: &str) -> Result<ProviderConfig, String> {
+        self.providers().select(name)
+    }
+
+    /// Replace the config section of the provider that `config` belongs to.
+    pub fn set_provider_config(&self, config: ProviderConfig) {
+        let mut providers = self
+            .provider
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match config {
+            ProviderConfig::Ollama(c) => providers.ollama = Some(c),
+            ProviderConfig::Anthropic(c) => providers.anthropic = Some(c),
+            ProviderConfig::OpenAi(c) => providers.openai = Some(c),
+        }
+    }
+
     pub fn provider_model(&self) -> Result<Option<String>, String> {
         Ok(match self.select_provider()? {
             ProviderConfig::Ollama(config) => config.model,

@@ -40,10 +40,14 @@ pub trait AgentProvider: Send + Sync {
 
 pub fn build(config: &Config) -> Result<Arc<dyn AgentProvider>, AgentError> {
     let provider_config = config.select_provider().map_err(|v| AgentError::Config(v))?;
+    build_for(&provider_config)
+}
+
+pub fn build_for(provider_config: &ProviderConfig) -> Result<Arc<dyn AgentProvider>, AgentError> {
     match provider_config {
-        ProviderConfig::Ollama(cfg) => {Ok(Arc::new(OllamaProvider::new(&cfg)?))}
-        ProviderConfig::Anthropic(cfg) => Ok(Arc::new(AnthropicProvider::new(&cfg)?)),
-        ProviderConfig::OpenAi(cfg) => Ok(Arc::new(OpenAiProvider::new(&cfg)?)),
+        ProviderConfig::Ollama(cfg) => Ok(Arc::new(OllamaProvider::new(cfg)?)),
+        ProviderConfig::Anthropic(cfg) => Ok(Arc::new(AnthropicProvider::new(cfg)?)),
+        ProviderConfig::OpenAi(cfg) => Ok(Arc::new(OpenAiProvider::new(cfg)?)),
     }
 }
 

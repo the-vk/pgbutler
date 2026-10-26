@@ -3,14 +3,15 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Paragraph};
 
 use crate::config::{Connection, SslMode};
 use crate::theme;
 use crate::ui::draw_banner;
+use crate::ui::widgets::Form;
 
 const FIELD_LABELS: [&str; 10] = [
     "Connection name",
@@ -25,15 +26,64 @@ const FIELD_LABELS: [&str; 10] = [
     "Client key (sslkey)",
 ];
 
-/// Index of the password field within `values`/`FIELD_LABELS`, used to mask
-/// its display.
 const PASSWORD_FIELD: usize = 5;
-/// Index of the sslmode field within `values`/`FIELD_LABELS`.
 const SSLMODE_FIELD: usize = 6;
 
+/// Build the connection details form pre-filled from `conn`.
+pub fn connection_form(conn: Connection) -> Form {
+    let modes = SslMode::ALL.iter().map(ToString::to_string).collect();
+    Form::new(
+        "Connection details",
+        &FIELD_LABELS,
+        vec![
+            conn.name,
+            conn.host,
+            conn.port.to_string(),
+            conn.catalog,
+            conn.login,
+            conn.password,
+            conn.sslmode.to_string(),
+            conn.sslrootcert.unwrap_or_default(),
+            conn.sslcert.unwrap_or_default(),
+            conn.sslkey.unwrap_or_default(),
+        ],
+    )
+    .masked(PASSWORD_FIELD)
+    .choice(SSLMODE_FIELD, modes)
+}
+
+/// Build a `Connection` from the form values, without validating it.
+pub fn connection_from_form(form: &Form) -> Result<Connection, String> {
+    let values = &form.values;
+    let port: u16 = values[2]
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid port '{}': must be a number 1-65535", values[2]))?;
+    let sslmode: SslMode = values[SSLMODE_FIELD].parse()?;
+    let non_empty = |s: &str| {
+        let s = s.trim();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.to_string())
+        }
+    };
+    Ok(Connection {
+        name: values[0].trim().to_string(),
+        host: values[1].trim().to_string(),
+        port,
+        catalog: values[3].trim().to_string(),
+        login: values[4].trim().to_string(),
+        password: values[PASSWORD_FIELD].clone(),
+        sslmode,
+        sslrootcert: non_empty(&values[7]),
+        sslcert: non_empty(&values[8]),
+        sslkey: non_empty(&values[9]),
+    })
+}
+
 pub struct SetupScreen {
-    values: [String; 10],
-    focus: usize,
+    form: Form,
     pub connecting: bool,
     pub error: Option<String>,
     /// Set by `App` right after construction when a saved profile should be
@@ -51,55 +101,11 @@ impl SetupScreen {
     /// automatic reconnect attempts and manual edits).
     pub fn from_connection(conn: Connection) -> Self {
         Self {
-            values: [
-                conn.name,
-                conn.host,
-                conn.port.to_string(),
-                conn.catalog,
-                conn.login,
-                conn.password,
-                conn.sslmode.to_string(),
-                conn.sslrootcert.unwrap_or_default(),
-                conn.sslcert.unwrap_or_default(),
-                conn.sslkey.unwrap_or_default(),
-            ],
-            focus: 0,
+            form: connection_form(conn),
             connecting: false,
             error: None,
             autoconnect: false,
         }
-    }
-
-    /// Build the `Connection` currently held in the draft, without applying
-    /// any validation yet.
-    fn draft_connection(&self) -> Result<Connection, String> {
-        let port: u16 = self.values[2].trim().parse().map_err(|_| {
-            format!(
-                "invalid port '{}': must be a number 1-65535",
-                self.values[2]
-            )
-        })?;
-        let sslmode: SslMode = self.values[SSLMODE_FIELD].parse()?;
-        let non_empty = |s: &str| {
-            let s = s.trim();
-            if s.is_empty() {
-                None
-            } else {
-                Some(s.to_string())
-            }
-        };
-        Ok(Connection {
-            name: self.values[0].trim().to_string(),
-            host: self.values[1].trim().to_string(),
-            port,
-            catalog: self.values[3].trim().to_string(),
-            login: self.values[4].trim().to_string(),
-            password: self.values[5].clone(),
-            sslmode,
-            sslrootcert: non_empty(&self.values[7]),
-            sslcert: non_empty(&self.values[8]),
-            sslkey: non_empty(&self.values[9]),
-        })
     }
 
     /// Snapshot of the draft connection, used by the app to kick off an
@@ -107,8 +113,8 @@ impl SetupScreen {
     pub fn draft(&self) -> Connection {
         // Autoconnect only happens right after `from_connection`, so this is
         // always a valid, previously-saved profile.
-        self.draft_connection()
-            .unwrap_or_else(|_| Connection::with_defaults(&self.values[0]))
+        connection_from_form(&self.form)
+            .unwrap_or_else(|_| Connection::with_defaults(&self.form.values[0]))
     }
 
     /// Handle a key press. Returns `Some(Connection)` when the user has
@@ -118,64 +124,24 @@ impl SetupScreen {
         if self.connecting {
             return None; // ignore input while a connection attempt is in flight
         }
-        match key.code {
-            KeyCode::Tab | KeyCode::Down => {
-                self.focus = (self.focus + 1) % self.values.len();
+        if key.code == KeyCode::Enter {
+            if self.form.focus + 1 < self.form.len() {
+                self.form.focus += 1;
+            } else {
+                return self.submit();
             }
-            KeyCode::BackTab | KeyCode::Up => {
-                self.focus = (self.focus + self.values.len() - 1) % self.values.len();
-            }
-            KeyCode::Left | KeyCode::Right if self.focus == SSLMODE_FIELD => {
-                self.cycle_sslmode(key.code == KeyCode::Right);
-            }
-            KeyCode::Backspace => {
-                self.values[self.focus].pop();
-            }
-            KeyCode::Char(c) => {
-                self.values[self.focus].push(c);
-            }
-            KeyCode::Enter => {
-                if self.focus + 1 < self.values.len() {
-                    self.focus += 1;
-                } else {
-                    return self.submit();
-                }
-            }
-            _ => {}
+        } else {
+            self.form.handle_key(key);
         }
         None
     }
 
-    /// Cycle the sslmode field to the next/previous known mode, wrapping
-    /// around. Falls back to `verify-full` if the current text isn't a
-    /// recognized mode (e.g. the user was mid-edit).
-    fn cycle_sslmode(&mut self, forward: bool) {
-        let modes = SslMode::ALL;
-        let current = self.values[SSLMODE_FIELD]
-            .parse::<SslMode>()
-            .unwrap_or_default();
-        let pos = modes.iter().position(|m| *m == current).unwrap_or(0);
-        let len = modes.len();
-        let next = if forward {
-            (pos + 1) % len
-        } else {
-            (pos + len - 1) % len
-        };
-        self.values[SSLMODE_FIELD] = modes[next].to_string();
-    }
-
     fn submit(&mut self) -> Option<Connection> {
-        match self.draft_connection() {
-            Ok(conn) => match conn.validate() {
-                Ok(()) => {
-                    self.error = None;
-                    Some(conn)
-                }
-                Err(err) => {
-                    self.error = Some(err);
-                    None
-                }
-            },
+        match connection_from_form(&self.form).and_then(|conn| conn.validate().map(|()| conn)) {
+            Ok(conn) => {
+                self.error = None;
+                Some(conn)
+            }
             Err(err) => {
                 self.error = Some(err);
                 None
@@ -191,41 +157,14 @@ impl SetupScreen {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(2),
-                Constraint::Length(self.values.len() as u16 + 2),
+                Constraint::Length(self.form.height()),
                 Constraint::Length(2),
                 Constraint::Min(1),
             ])
             .split(area);
 
         draw_banner(frame, chunks[0], "Set up a PostgreSQL connection");
-
-        let form_block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::ACCENT_DIM))
-            .title(" Connection details ")
-            .title_style(
-                Style::default()
-                    .fg(theme::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            );
-        let inner = form_block.inner(chunks[1]);
-        frame.render_widget(form_block, chunks[1]);
-
-        let field_rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(vec![Constraint::Length(1); self.values.len()])
-            .split(inner);
-
-        for (i, label) in FIELD_LABELS.iter().enumerate() {
-            let masked;
-            let display_value = if i == PASSWORD_FIELD {
-                masked = "•".repeat(self.values[i].chars().count());
-                &masked
-            } else {
-                &self.values[i]
-            };
-            self.draw_field(frame, field_rows[i], label, display_value, i == self.focus);
-        }
+        self.form.draw(frame, chunks[1]);
 
         let status = if self.connecting {
             Line::from(Span::styled(
@@ -246,38 +185,5 @@ impl SetupScreen {
             ))
         };
         frame.render_widget(Paragraph::new(status), chunks[2]);
-    }
-
-    fn draw_field(&self, frame: &mut Frame, area: Rect, label: &str, value: &str, focused: bool) {
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(28), Constraint::Min(1)])
-            .split(area);
-
-        let label_style = if focused {
-            Style::default()
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme::MUTED)
-        };
-        frame.render_widget(
-            Paragraph::new(Span::styled(format!("{label:>26} "), label_style))
-                .alignment(Alignment::Left),
-            cols[0],
-        );
-
-        let value_style = if focused {
-            Style::default()
-                .fg(theme::TEXT)
-                .add_modifier(Modifier::UNDERLINED)
-        } else {
-            Style::default().fg(theme::TEXT)
-        };
-        let cursor = if focused { "▏" } else { "" };
-        frame.render_widget(
-            Paragraph::new(Span::styled(format!("{value}{cursor}"), value_style)),
-            cols[1],
-        );
     }
 }
