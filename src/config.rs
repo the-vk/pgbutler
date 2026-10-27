@@ -173,16 +173,16 @@ struct Providers {
 impl Providers {
     fn select(&self, name: &str) -> Result<ProviderConfig, String> {
         match name {
-            "ollama" => Ok(ProviderConfig::Ollama(
-                self.ollama.clone().ok_or("provider 'ollama' selected but no [provider.ollama] section is set")?,
-            )),
-            "anthropic" => Ok(ProviderConfig::Anthropic(
-                self.anthropic.clone().ok_or("provider 'anthropic' selected but no [provider.anthropic] section is set")?,
-            )),
-            "openai" => Ok(ProviderConfig::OpenAi(
-                self.openai.clone().ok_or("provider 'openai' selected but no [provider.openai] section is set")?,
-            )),
-            other => Err(format!("unknown provider '{other}'"))
+            "ollama" => Ok(ProviderConfig::Ollama(self.ollama.clone().ok_or(
+                "provider 'ollama' selected but no [provider.ollama] section is set",
+            )?)),
+            "anthropic" => Ok(ProviderConfig::Anthropic(self.anthropic.clone().ok_or(
+                "provider 'anthropic' selected but no [provider.anthropic] section is set",
+            )?)),
+            "openai" => Ok(ProviderConfig::OpenAi(self.openai.clone().ok_or(
+                "provider 'openai' selected but no [provider.openai] section is set",
+            )?)),
+            other => Err(format!("unknown provider '{other}'")),
         }
     }
 
@@ -282,8 +282,14 @@ impl Config {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match name.as_str() {
-            "anthropic" => providers.anthropic.as_mut().map(|c| c.api_key = api_key.to_owned()),
-            "openai" => providers.openai.as_mut().map(|c| c.api_key = api_key.to_owned()),
+            "anthropic" => providers
+                .anthropic
+                .as_mut()
+                .map(|c| c.api_key = api_key.to_owned()),
+            "openai" => providers
+                .openai
+                .as_mut()
+                .map(|c| c.api_key = api_key.to_owned()),
             "ollama" => return Err("provider 'ollama' does not use an API key".into()),
             other => return Err(format!("unknown provider '{other}'")),
         }
@@ -346,7 +352,9 @@ impl Config {
             .connections
             .write()
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        if let Some(existing) = connections.iter_mut().find(|existing| existing.name == conn.name)
+        if let Some(existing) = connections
+            .iter_mut()
+            .find(|existing| existing.name == conn.name)
         {
             *existing = conn.clone();
         } else {
@@ -354,6 +362,17 @@ impl Config {
         }
         connections.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(path)
+    }
+
+    pub fn delete_connection(&self, name: &str) -> std::io::Result<()> {
+        let path = connections_dir().join(format!("{}.toml", sanitize_filename(name)));
+        fs::remove_file(path)?;
+        let mut connections = self
+            .connections
+            .write()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        connections.retain(|connection| connection.name != name);
+        Ok(())
     }
 
     fn with_defaults(&self) -> Self {
@@ -622,14 +641,21 @@ mod tests {
         };
 
         let normalized = config.with_defaults();
-        let ProviderConfig::Ollama(ollama) = normalized.select_provider().expect("provider")
-        else {
+        let ProviderConfig::Ollama(ollama) = normalized.select_provider().expect("provider") else {
             panic!("expected ollama provider");
         };
         assert_eq!(ollama.base_url.as_deref(), Some(DEFAULT_OLLAMA_URL));
         assert_eq!(ollama.model.as_deref(), Some("qwen3"));
         assert_eq!(ollama.num_ctx, Some(DEFAULT_OLLAMA_NUM_CTX));
-        assert!(config.providers().ollama.as_ref().unwrap().base_url.is_none());
+        assert!(
+            config
+                .providers()
+                .ollama
+                .as_ref()
+                .unwrap()
+                .base_url
+                .is_none()
+        );
     }
 
     #[test]

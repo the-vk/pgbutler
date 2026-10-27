@@ -5,19 +5,27 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use crate::config::{AnthropicConfig, Config, OllamaConfig, OpenAiConfig, ProviderConfig};
+use crate::config::{
+    AnthropicConfig, Config, Connection, OllamaConfig, OpenAiConfig, ProviderConfig,
+};
 use crate::theme;
 use crate::ui::draw_banner;
 use crate::ui::setup::{connection_form, connection_from_form};
 use crate::ui::widgets::{Form, draw_menu};
 
 const PROVIDERS: [&str; 3] = ["ollama", "anthropic", "openai"];
-const ROOT_ITEMS: [&str; 5] = ["Connections", "Application", "Ollama", "Anthropic", "OpenAI"];
+const ROOT_ITEMS: [&str; 5] = [
+    "Connections",
+    "Application",
+    "Ollama",
+    "Anthropic",
+    "OpenAI",
+];
 
 pub enum SettingsEvent {
     None,
@@ -62,6 +70,7 @@ pub struct SettingsScreen {
     config: Arc<Config>,
     path: Vec<Level>,
     error: Option<String>,
+    delete_confirmation: Option<String>,
     provider_dirty: bool,
 }
 
@@ -71,6 +80,7 @@ impl SettingsScreen {
             config,
             path: vec![Level::new(Node::Root, None)],
             error: None,
+            delete_confirmation: None,
             provider_dirty: false,
         }
     }
@@ -118,12 +128,37 @@ impl SettingsScreen {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsEvent {
+        if let Some(name) = self.delete_confirmation.clone() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    self.delete_confirmation = None;
+                    match self.config.delete_connection(&name) {
+                        Ok(()) => {
+                            let count = self.menu_items().len();
+                            self.current_mut().selected =
+                                self.current().selected.min(count.saturating_sub(1));
+                            self.error = None;
+                        }
+                        Err(err) => {
+                            self.error = Some(format!("failed to delete connection: {err}"))
+                        }
+                    }
+                }
+                KeyCode::Char('n') | KeyCode::Esc => self.delete_confirmation = None,
+                _ => {}
+            }
+            return SettingsEvent::None;
+        }
         if key.code == KeyCode::Esc {
             return self.back();
         }
         if self.current().form.is_some() {
             if key.code == KeyCode::Enter
-                && self.current().form.as_ref().is_some_and(Form::focus_is_drill)
+                && self
+                    .current()
+                    .form
+                    .as_ref()
+                    .is_some_and(Form::focus_is_drill)
             {
                 return self.open_models();
             }
@@ -136,6 +171,15 @@ impl SettingsScreen {
         }
         let count = self.menu_items().len();
         match key.code {
+            KeyCode::Char('+') if matches!(self.current().node, Node::Connections) => {
+                self.add_connection();
+            }
+            KeyCode::Char('-') if matches!(self.current().node, Node::Connections) => {
+                if let Some(name) = self.menu_items().get(self.current().selected).cloned() {
+                    self.delete_confirmation = Some(name);
+                    self.error = None;
+                }
+            }
             KeyCode::Down if count > 0 => {
                 let level = self.current_mut();
                 level.selected = (level.selected + 1) % count;
@@ -149,6 +193,24 @@ impl SettingsScreen {
             _ => {}
         }
         SettingsEvent::None
+    }
+
+    fn add_connection(&mut self) {
+        let existing: Vec<String> = self.menu_items();
+        let base_name = "new-connection";
+        let name = if !existing.iter().any(|name| name == base_name) {
+            base_name.to_owned()
+        } else {
+            (2..)
+                .map(|suffix| format!("{base_name}-{suffix}"))
+                .find(|candidate| !existing.contains(candidate))
+                .expect("an unused connection name always exists")
+        };
+        self.error = None;
+        self.path.push(Level::new(
+            Node::Connection(name.clone()),
+            Some(connection_form(Connection::with_defaults(name))),
+        ));
     }
 
     fn open_models(&mut self) -> SettingsEvent {
@@ -193,9 +255,11 @@ impl SettingsScreen {
     fn parent_model(&self) -> String {
         let parent = self.path.len().checked_sub(2).map(|i| &self.path[i]);
         match parent {
-            Some(Level { node: Node::Provider(name), form: Some(form), .. }) => {
-                form.values[model_field(name)].clone()
-            }
+            Some(Level {
+                node: Node::Provider(name),
+                form: Some(form),
+                ..
+            }) => form.values[model_field(name)].clone(),
             _ => String::new(),
         }
     }
@@ -273,9 +337,7 @@ impl SettingsScreen {
                         ],
                     )
                     .drill(1),
-                    ProviderConfig::Anthropic(c) => {
-                        api_form(title, c.api_key, c.base_url, c.model)
-                    }
+                    ProviderConfig::Anthropic(c) => api_form(title, c.api_key, c.base_url, c.model),
                     ProviderConfig::OpenAi(c) => api_form(title, c.api_key, c.base_url, c.model),
                 })
             }
@@ -308,7 +370,9 @@ impl SettingsScreen {
             Node::Connection(_) => {
                 let conn = connection_from_form(form)?;
                 conn.validate()?;
-                self.config.save_connection(&conn).map_err(|e| e.to_string())?;
+                self.config
+                    .save_connection(&conn)
+                    .map_err(|e| e.to_string())?;
             }
             Node::App => {
                 self.config.set_provider(&form.values[0])?;
@@ -364,6 +428,8 @@ impl SettingsScreen {
                     " Tab/Shift+Tab to move, ←/→ to change choices, Enter on › to pick from a list, Esc to save and go back "
                 } else if matches!(level.node, Node::Models(_)) {
                     " ↑/↓ to select, Enter to confirm, Esc to cancel "
+                } else if matches!(level.node, Node::Connections) {
+                    " ↑/↓ to select, Enter to open, + to add, - to delete, Esc to go back "
                 } else {
                     " ↑/↓ to select, Enter to open, Esc to go back "
                 },
@@ -371,6 +437,39 @@ impl SettingsScreen {
             ),
         };
         frame.render_widget(Paragraph::new(Line::from(status)), chunks[2]);
+
+        if let Some(name) = &self.delete_confirmation {
+            let popup_rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(40),
+                    Constraint::Length(4),
+                    Constraint::Percentage(40),
+                ])
+                .split(area);
+            let popup_columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(20),
+                    Constraint::Percentage(60),
+                    Constraint::Percentage(20),
+                ])
+                .split(popup_rows[1]);
+            let popup = popup_columns[1];
+            frame.render_widget(Clear, popup);
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "Delete connection '{name}'?\ny/Enter: confirm   n/Esc: cancel"
+                ))
+                .alignment(Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Confirm deletion "),
+                ),
+                popup,
+            );
+        }
     }
 }
 
