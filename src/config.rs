@@ -1,9 +1,8 @@
 //! Connection configuration storage.
 //!
-//! Connections are stored as individual TOML files under
-//! `~/.pgbutler/connections/<name>.toml`. TLS behavior is controlled by
-//! `sslmode` (mirroring libpq); certificate files are only required when the
-//! selected mode actually needs them (see [`SslMode`]).
+//! Servers are stored as individual TOML files under
+//! `~/.pgbutler/connections/<name>.toml`, with login profiles nested under
+//! each server. TLS behavior is controlled by `sslmode` (mirroring libpq).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -215,8 +214,9 @@ impl Default for Providers {
 pub struct Config {
     app: RwLock<AppSection>,
     provider: RwLock<Providers>,
+    default_connection: RwLock<Option<String>>,
     #[serde(skip)]
-    connections: RwLock<Vec<Connection>>,
+    servers: RwLock<Vec<ServerConfig>>,
 }
 
 impl Config {
@@ -227,7 +227,7 @@ impl Config {
         } else {
             Config::default()
         };
-        config.connections = RwLock::new(load_connection_profiles()?);
+        config.servers = RwLock::new(load_server_profiles()?);
         Ok(config.with_defaults())
     }
 
@@ -329,6 +329,20 @@ impl Config {
             .clone()
     }
 
+    pub fn default_connection(&self) -> Option<String> {
+        self.default_connection
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn set_default_connection(&self, conn: &Connection) {
+        *self
+            .default_connection
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(conn.selector());
+    }
+
     /// Switch the active provider; fails if it is unknown or has no config section.
     pub fn set_provider(&self, name: &str) -> Result<(), String> {
         self.providers().select(name)?;
@@ -339,39 +353,158 @@ impl Config {
         Ok(())
     }
 
-    pub fn connections(&self) -> Vec<Connection> {
-        self.connections
+    pub fn servers(&self) -> Vec<ServerConfig> {
+        self.servers
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
-    pub fn save_connection(&self, conn: &Connection) -> std::io::Result<PathBuf> {
-        let path = save_connection_profile(conn)?;
-        let mut connections = self
-            .connections
+    /// Flatten each saved server/login pair for runtime consumers.
+    pub fn connections(&self) -> Vec<Connection> {
+        self.servers()
+            .into_iter()
+            .flat_map(|server| {
+                server
+                    .logins
+                    .iter()
+                    .map(|login| server.flatten(login))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    pub fn save_server(
+        &self,
+        server: &ServerConfig,
+        old_name: Option<&str>,
+    ) -> std::io::Result<PathBuf> {
+        if self.servers().iter().any(|existing| {
+            old_name != Some(existing.name.as_str())
+                && (existing.name == server.name
+                    || sanitize_filename(&existing.name) == sanitize_filename(&server.name))
+        }) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("server '{}' already exists", server.name),
+            ));
+        }
+        let path = save_server_profile(server)?;
+        if let Some(old_name) = old_name
+            && old_name != server.name
+        {
+            let old_path = connections_dir().join(format!("{}.toml", sanitize_filename(old_name)));
+            if old_path != path && old_path.exists() {
+                fs::remove_file(old_path)?;
+            }
+        }
+
+        let mut servers = self
+            .servers
             .write()
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        if let Some(existing) = connections
-            .iter_mut()
-            .find(|existing| existing.name == conn.name)
-        {
-            *existing = conn.clone();
+        if let Some(existing) = servers.iter_mut().find(|existing| {
+            existing.name == server.name || old_name.is_some_and(|name| existing.name == name)
+        }) {
+            *existing = server.clone();
         } else {
-            connections.push(conn.clone());
+            servers.push(server.clone());
         }
-        connections.sort_by(|left, right| left.name.cmp(&right.name));
+        servers.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(path)
     }
 
-    pub fn delete_connection(&self, name: &str) -> std::io::Result<()> {
-        let path = connections_dir().join(format!("{}.toml", sanitize_filename(name)));
-        fs::remove_file(path)?;
-        let mut connections = self
-            .connections
+    pub fn save_login(
+        &self,
+        server_name: &str,
+        index: Option<usize>,
+        login: &LoginConfig,
+    ) -> std::io::Result<()> {
+        let mut server = self
+            .servers()
+            .into_iter()
+            .find(|server| server.name == server_name)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "server not found"))?;
+        if let Some(index) = index {
+            let Some(existing) = server.logins.get_mut(index) else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "login not found",
+                ));
+            };
+            *existing = login.clone();
+        } else {
+            server.logins.push(login.clone());
+        }
+        save_server_profile(&server)?;
+        let mut servers = self
+            .servers
             .write()
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        connections.retain(|connection| connection.name != name);
+        if let Some(existing) = servers
+            .iter_mut()
+            .find(|existing| existing.name == server.name)
+        {
+            *existing = server;
+        }
+        Ok(())
+    }
+
+    pub fn delete_login(&self, server_name: &str, index: usize) -> std::io::Result<()> {
+        let mut server = self
+            .servers()
+            .into_iter()
+            .find(|server| server.name == server_name)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "server not found"))?;
+        if index >= server.logins.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "login not found",
+            ));
+        }
+        server.logins.remove(index);
+        save_server_profile(&server)?;
+        let mut servers = self
+            .servers
+            .write()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if let Some(existing) = servers
+            .iter_mut()
+            .find(|existing| existing.name == server.name)
+        {
+            *existing = server;
+        }
+        Ok(())
+    }
+
+    pub fn save_connection(&self, conn: &Connection) -> std::io::Result<PathBuf> {
+        let mut server = self
+            .servers()
+            .into_iter()
+            .find(|server| server.name == conn.name)
+            .unwrap_or_else(|| ServerConfig::from_connection(conn));
+        server.update_from_connection(conn);
+        let login = LoginConfig::from_connection(conn);
+        if let Some(existing) = server
+            .logins
+            .iter_mut()
+            .find(|existing| existing.login == login.login && existing.catalog == login.catalog)
+        {
+            *existing = login;
+        } else {
+            server.logins.push(login);
+        }
+        self.save_server(&server, None)
+    }
+
+    pub fn delete_server(&self, name: &str) -> std::io::Result<()> {
+        let path = connections_dir().join(format!("{}.toml", sanitize_filename(name)));
+        fs::remove_file(path)?;
+        let mut servers = self
+            .servers
+            .write()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        servers.retain(|server| server.name != name);
         Ok(())
     }
 
@@ -384,7 +517,8 @@ impl Config {
                     .with_defaults(),
             ),
             provider: RwLock::new(self.providers().with_defaults()),
-            connections: RwLock::new(self.connections()),
+            default_connection: RwLock::new(self.default_connection()),
+            servers: RwLock::new(self.servers()),
         }
     }
 }
@@ -398,32 +532,128 @@ pub fn default_schema() -> Option<String> {
     Some("public".to_string())
 }
 
-/// A single PostgreSQL connection profile, persisted to disk as TOML.
+/// A PostgreSQL server and its shared network/TLS settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Connection {
-    /// Friendly, unique name for this connection (used as the file stem).
+#[serde(default)]
+pub struct ServerConfig {
+    /// Friendly, unique name for this server (also used as the file stem).
     pub name: String,
     pub host: String,
     pub port: u16,
-    pub catalog: String,
-    pub login: String,
     /// How strictly TLS is required and verified; see [`SslMode`].
-    #[serde(default)]
     pub sslmode: SslMode,
     /// Path to the CA certificate used to verify the server. Only required
     /// when `sslmode` is `verify-ca` or `verify-full`.
-    #[serde(default)]
     pub sslrootcert: Option<String>,
     /// Path to the client certificate presented to the server. Always
     /// optional: used for mutual TLS if provided and TLS is in use.
-    #[serde(default)]
     pub sslcert: Option<String>,
     /// Path to the client private key matching `sslcert`. Always optional,
     /// on the same terms as `sslcert`.
-    #[serde(default)]
     pub sslkey: Option<String>,
+    #[serde(default)]
+    pub logins: Vec<LoginConfig>,
+}
+
+impl ServerConfig {
+    pub fn with_defaults(name: impl Into<String>) -> Self {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let pg_dir = home.join(".postgresql");
+        Self {
+            name: name.into(),
+            host: "localhost".to_string(),
+            port: 5432,
+            sslmode: SslMode::default(),
+            sslrootcert: Some(pg_dir.join("root.crt").to_string_lossy().into_owned()),
+            sslcert: Some(pg_dir.join("postgresql.crt").to_string_lossy().into_owned()),
+            sslkey: Some(pg_dir.join("postgresql.key").to_string_lossy().into_owned()),
+            logins: Vec::new(),
+        }
+    }
+
+    fn from_connection(conn: &Connection) -> Self {
+        Self {
+            name: conn.name.clone(),
+            host: conn.host.clone(),
+            port: conn.port,
+            sslmode: conn.sslmode,
+            sslrootcert: conn.sslrootcert.clone(),
+            sslcert: conn.sslcert.clone(),
+            sslkey: conn.sslkey.clone(),
+            logins: Vec::new(),
+        }
+    }
+
+    fn update_from_connection(&mut self, conn: &Connection) {
+        self.host = conn.host.clone();
+        self.port = conn.port;
+        self.sslmode = conn.sslmode;
+        self.sslrootcert = conn.sslrootcert.clone();
+        self.sslcert = conn.sslcert.clone();
+        self.sslkey = conn.sslkey.clone();
+    }
+
+    pub fn flatten(&self, login: &LoginConfig) -> Connection {
+        Connection {
+            name: self.name.clone(),
+            host: self.host.clone(),
+            port: self.port,
+            catalog: login.catalog.clone(),
+            login: login.login.clone(),
+            password: login.password.clone(),
+            sslmode: self.sslmode,
+            sslrootcert: self.sslrootcert.clone(),
+            sslcert: self.sslcert.clone(),
+            sslkey: self.sslkey.clone(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.host.trim().is_empty() {
+            return Err("host must not be empty".into());
+        }
+        if self.port == 0 {
+            return Err("port must be between 1 and 65535".into());
+        }
+        check_cert_path(
+            "root CA certificate (sslrootcert)",
+            &self.sslrootcert,
+            self.sslmode.requires_root_cert(),
+            self.sslmode,
+        )?;
+        check_cert_path(
+            "client certificate (sslcert)",
+            &self.sslcert,
+            false,
+            self.sslmode,
+        )?;
+        check_cert_path("client key (sslkey)", &self.sslkey, false, self.sslmode)?;
+        let is_cert_set = self
+            .sslcert
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
+        let is_key_set = self.sslkey.as_deref().is_some_and(|s| !s.trim().is_empty());
+        if is_cert_set != is_key_set {
+            return Err("sslcert and sslkey must both be set, or both left empty".into());
+        }
+        Ok(())
+    }
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self::with_defaults(String::new())
+    }
+}
+
+/// Credentials and database selection scoped to one server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoginConfig {
+    pub catalog: String,
+    pub login: String,
     /// Plaintext password for `login`, kept in memory only. Encrypted at
-    /// rest with the `crypto` module when the connection is serialized to
+    /// rest with the `crypto` module when the server is serialized to
     /// disk, and transparently decrypted back to plaintext when read.
     #[serde(
         default,
@@ -433,65 +663,69 @@ pub struct Connection {
     pub password: String,
 }
 
-impl Connection {
-    /// Reasonable defaults for a new connection, ready to be edited by the user.
-    pub fn with_defaults(name: impl Into<String>) -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let pg_dir = home.join(".postgresql");
+impl LoginConfig {
+    pub fn with_defaults() -> Self {
         Self {
-            name: name.into(),
-            host: "localhost".to_string(),
-            port: 5432,
             catalog: "postgres".to_string(),
             login: whoami_fallback(),
-            sslmode: SslMode::default(),
-            sslrootcert: Some(pg_dir.join("root.crt").to_string_lossy().into_owned()),
-            sslcert: Some(pg_dir.join("postgresql.crt").to_string_lossy().into_owned()),
-            sslkey: Some(pg_dir.join("postgresql.key").to_string_lossy().into_owned()),
             password: String::new(),
         }
     }
 
-    /// Validate the connection, including the mutual-TLS material mandated
-    /// by `sslmode` (see [`SslMode::requires_root_cert`]). Certificate paths
-    /// that are configured are always checked for existence, even when not
-    /// strictly required by `sslmode`.
-    pub fn validate(&self) -> Result<(), String> {
-        if self.host.trim().is_empty() {
-            return Err("host must not be empty".into());
+    fn from_connection(conn: &Connection) -> Self {
+        Self {
+            catalog: conn.catalog.clone(),
+            login: conn.login.clone(),
+            password: conn.password.clone(),
         }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
         if self.catalog.trim().is_empty() {
             return Err("database name must not be empty".into());
         }
         if self.login.trim().is_empty() {
             return Err("user must not be empty".into());
         }
-
-        check_cert_path(
-            "root CA certificate (sslrootcert)",
-            &self.sslrootcert,
-            self.sslmode.requires_root_cert(),
-            self.sslmode,
-        )?;
-        // Client certificate/key are never mandated by sslmode, but if one
-        // half of the pair is set the other must be too, and any path that
-        // is set must exist.
-        check_cert_path(
-            "client certificate (sslcert)",
-            &self.sslcert,
-            false,
-            self.sslmode,
-        )?;
-        check_cert_path("client key (sslkey)", &self.sslkey, false, self.sslmode)?;
-        let is_cert_empty = self
-            .sslcert
-            .as_deref()
-            .is_some_and(|s| !s.trim().is_empty());
-        let is_cert_key_empty = self.sslkey.as_deref().is_some_and(|s| !s.trim().is_empty());
-        if is_cert_empty != is_cert_key_empty {
-            return Err("sslcert and sslkey must both be set, or both left empty".into());
-        }
         Ok(())
+    }
+}
+
+impl Default for LoginConfig {
+    fn default() -> Self {
+        Self::with_defaults()
+    }
+}
+
+/// Flattened server/login selection used by the setup flow and runtime tools.
+#[derive(Debug, Clone)]
+pub struct Connection {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub catalog: String,
+    pub login: String,
+    pub password: String,
+    pub sslmode: SslMode,
+    pub sslrootcert: Option<String>,
+    pub sslcert: Option<String>,
+    pub sslkey: Option<String>,
+}
+
+impl Connection {
+    /// Reasonable defaults for a new flattened server/login selection.
+    pub fn with_defaults(name: impl Into<String>) -> Self {
+        let server = ServerConfig::with_defaults(name);
+        server.flatten(&LoginConfig::default())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        ServerConfig::from_connection(self).validate()?;
+        LoginConfig::from_connection(self).validate()
+    }
+
+    pub fn selector(&self) -> String {
+        format!("{}@{}", self.login, self.name)
     }
 }
 
@@ -578,12 +812,12 @@ pub fn config_file() -> PathBuf {
     app_dir().join("config.toml")
 }
 
-fn load_connection_profiles() -> std::io::Result<Vec<Connection>> {
+fn load_server_profiles() -> std::io::Result<Vec<ServerConfig>> {
     let dir = connections_dir();
     if !dir.exists() {
         return Ok(Vec::new());
     }
-    let mut connections = Vec::new();
+    let mut servers = Vec::new();
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -591,22 +825,68 @@ fn load_connection_profiles() -> std::io::Result<Vec<Connection>> {
             continue;
         }
         let contents = fs::read_to_string(&path)?;
-        match toml::from_str::<Connection>(&contents) {
-            Ok(conn) => connections.push(conn),
-            Err(_) => continue, // skip unreadable/malformed profiles
+        if let Some(server) = parse_server_profile(&contents) {
+            servers.push(server);
         }
     }
-    connections.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(connections)
+    servers.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(servers)
 }
 
-fn save_connection_profile(conn: &Connection) -> std::io::Result<PathBuf> {
+fn parse_server_profile(contents: &str) -> Option<ServerConfig> {
+    let value = toml::from_str::<toml::Value>(contents).ok()?;
+    if value.get("logins").is_some() {
+        return toml::from_str(contents).ok();
+    }
+    toml::from_str::<LegacyConnection>(contents)
+        .ok()
+        .map(|legacy| {
+            let mut server = ServerConfig::with_defaults(legacy.name);
+            server.host = legacy.host;
+            server.port = legacy.port;
+            server.sslmode = legacy.sslmode;
+            server.sslrootcert = legacy.sslrootcert;
+            server.sslcert = legacy.sslcert;
+            server.sslkey = legacy.sslkey;
+            server.logins.push(LoginConfig {
+                catalog: legacy.catalog,
+                login: legacy.login,
+                password: legacy.password,
+            });
+            server
+        })
+}
+
+fn save_server_profile(server: &ServerConfig) -> std::io::Result<PathBuf> {
     let dir = connections_dir();
     fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{}.toml", sanitize_filename(&conn.name)));
-    let contents = toml::to_string_pretty(conn).expect("connection is always serializable");
+    let path = dir.join(format!("{}.toml", sanitize_filename(&server.name)));
+    let contents = toml::to_string_pretty(server).expect("server is always serializable");
     fs::write(&path, contents)?;
     Ok(path)
+}
+
+#[derive(Deserialize)]
+struct LegacyConnection {
+    name: String,
+    host: String,
+    port: u16,
+    catalog: String,
+    login: String,
+    #[serde(default)]
+    sslmode: SslMode,
+    #[serde(default)]
+    sslrootcert: Option<String>,
+    #[serde(default)]
+    sslcert: Option<String>,
+    #[serde(default)]
+    sslkey: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "serialize_password",
+        deserialize_with = "deserialize_password"
+    )]
+    password: String,
 }
 
 fn sanitize_filename(name: &str) -> String {
@@ -687,31 +967,99 @@ mod tests {
     }
 
     #[test]
+    fn legacy_connection_profile_loads_as_a_server_with_one_login() {
+        let profile = r#"
+name = "warehouse"
+host = "db.example.test"
+port = 5433
+catalog = "inventory"
+login = "analyst"
+password = ""
+sslmode = "disable"
+"#;
+        let server = parse_server_profile(profile).expect("legacy profile should load");
+
+        assert_eq!(server.name, "warehouse");
+        assert_eq!(server.host, "db.example.test");
+        assert_eq!(server.port, 5433);
+        assert_eq!(server.logins.len(), 1);
+        assert_eq!(server.logins[0].catalog, "inventory");
+        assert_eq!(server.logins[0].login, "analyst");
+    }
+
+    #[test]
+    fn connections_flatten_server_and_login_settings() {
+        let mut server = ServerConfig::with_defaults("warehouse");
+        server.host = "db.example.test".to_owned();
+        server.port = 5433;
+        server.sslmode = SslMode::Disable;
+        server.sslrootcert = None;
+        server.sslcert = None;
+        server.sslkey = None;
+        server.logins.push(LoginConfig {
+            catalog: "inventory".to_owned(),
+            login: "analyst".to_owned(),
+            password: "secret".to_owned(),
+        });
+        let config = Config {
+            servers: RwLock::new(vec![server]),
+            ..Config::default()
+        };
+
+        let connection = config.connections().pop().expect("flattened connection");
+        assert_eq!(connection.name, "warehouse");
+        assert_eq!(connection.host, "db.example.test");
+        assert_eq!(connection.port, 5433);
+        assert_eq!(connection.catalog, "inventory");
+        assert_eq!(connection.login, "analyst");
+        assert_eq!(connection.password, "secret");
+    }
+
+    #[test]
+    fn default_connection_selector_round_trips_in_main_config() {
+        let config = Config::default();
+        let mut connection = Connection::with_defaults("warehouse");
+        connection.login = "alice".to_owned();
+        config.set_default_connection(&connection);
+
+        let serialized = toml::to_string(&config).expect("config should serialize");
+        let deserialized: Config = toml::from_str(&serialized).expect("config should deserialize");
+
+        assert_eq!(
+            deserialized.default_connection().as_deref(),
+            Some("alice@warehouse")
+        );
+    }
+
+    #[test]
     #[ignore = "touches the real macOS login Keychain (creates/reads the master key); run manually"]
     fn password_is_encrypted_at_rest_and_round_trips() {
-        let mut conn = Connection::with_defaults("pw-test-connection");
-        conn.password = "s3cr3t-p@ssw0rd".to_string();
+        let mut server = ServerConfig::with_defaults("pw-test-server");
+        let mut login = LoginConfig::with_defaults();
+        login.password = "s3cr3t-p@ssw0rd".to_string();
+        server.logins.push(login);
 
-        let serialized = toml::to_string_pretty(&conn).expect("serialization should succeed");
+        let serialized = toml::to_string_pretty(&server).expect("serialization should succeed");
         // The plaintext password must never appear in the serialized form.
         assert!(!serialized.contains("s3cr3t-p@ssw0rd"));
 
-        let deserialized: Connection =
+        let deserialized: ServerConfig =
             toml::from_str(&serialized).expect("deserialization should succeed");
-        assert_eq!(deserialized.password, conn.password);
+        assert_eq!(deserialized.logins[0].password, server.logins[0].password);
     }
 
     #[test]
     fn empty_password_round_trips_without_encryption() {
-        let conn = Connection::with_defaults("no-pw-test-connection");
-        assert!(conn.password.is_empty());
+        let mut server = ServerConfig::with_defaults("no-pw-test-server");
+        server.logins.push(LoginConfig::with_defaults());
+        assert!(server.logins[0].password.is_empty());
 
-        let serialized = toml::to_string_pretty(&conn).expect("serialization should succeed");
+        let serialized = toml::to_string_pretty(&server).expect("serialization should succeed");
         assert!(serialized.contains("password = \"\""));
 
-        let deserialized: Connection =
+        let deserialized: ServerConfig =
             toml::from_str(&serialized).expect("deserialization should succeed");
-        assert!(deserialized.password.is_empty());
+        assert!(deserialized.logins[0].password.is_empty());
     }
 
     #[test]

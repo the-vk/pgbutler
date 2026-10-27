@@ -28,7 +28,6 @@ pub struct Form {
     pub values: Vec<String>,
     pub focus: usize,
     masked: Vec<usize>,
-    readonly: Vec<usize>,
     choices: Vec<(usize, Vec<String>)>,
     drill: Vec<usize>,
 }
@@ -42,7 +41,6 @@ impl Form {
             values,
             focus: 0,
             masked: Vec::new(),
-            readonly: Vec::new(),
             choices: Vec::new(),
             drill: Vec::new(),
         }
@@ -61,11 +59,6 @@ impl Form {
     /// Display the field as bullets.
     pub fn masked(mut self, index: usize) -> Self {
         self.masked.push(index);
-        self
-    }
-
-    pub fn readonly(mut self, index: usize) -> Self {
-        self.readonly.push(index);
         self
     }
 
@@ -97,7 +90,7 @@ impl Form {
             KeyCode::BackTab | KeyCode::Up => self.focus = (self.focus + len - 1) % len,
             KeyCode::Left | KeyCode::Right if options.is_some() => {
                 let options = options.unwrap_or_default();
-                if options.is_empty() || self.readonly.contains(&self.focus) {
+                if options.is_empty() {
                     return false;
                 }
                 let pos = options.iter().position(|o| *o == self.values[self.focus]);
@@ -110,13 +103,11 @@ impl Form {
                 self.values[self.focus] = options[next].clone();
                 return true;
             }
-            KeyCode::Backspace if options.is_none() && !self.readonly.contains(&self.focus) => {
+            KeyCode::Backspace if options.is_none() => {
                 return self.values[self.focus].pop().is_some();
             }
             KeyCode::Char(c)
-                if options.is_none()
-                    && !self.readonly.contains(&self.focus)
-                    && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                if options.is_none() && !key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.values[self.focus].push(c);
                 return true;

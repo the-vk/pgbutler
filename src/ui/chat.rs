@@ -34,6 +34,7 @@ pub struct Message {
 /// Action to execute in the background when the user submits input.
 pub enum ChatAction {
     Query(String),
+    Connect(Connection),
     Explain(String),
     Analyze(String),
     RelKind(String, String),
@@ -50,6 +51,7 @@ pub struct ChatScreen {
     pub messages: Vec<Message>,
     pub input: String,
     input_cursor: usize,
+    connect_suggestion_index: usize,
     pub busy: bool,
     analysis_preview: Option<String>,
     usage_summary: Option<String>,
@@ -66,7 +68,7 @@ impl ChatScreen {
         messages.push(Message {
             role: Role::System,
             content: format!(
-                "Connected to '{}' as {}@{}:{}/{} (mutual TLS, verify-full). Type SQL and press Enter. /help for commands.",
+                "Connected to '{}' as {}@{}:{}/{}. Type SQL and press Enter. /help for commands.",
                 conn.name, conn.login, conn.host, conn.port, conn.catalog
             ),
         });
@@ -77,6 +79,7 @@ impl ChatScreen {
             messages,
             input: String::new(),
             input_cursor: 0,
+            connect_suggestion_index: 0,
             busy: false,
             analysis_preview: None,
             usage_summary: None,
@@ -157,6 +160,12 @@ impl ChatScreen {
         if self.busy {
             return None;
         }
+        let suggestions = self.connect_suggestions();
+        if let Some((_, matches)) = &suggestions
+            && !matches.is_empty()
+        {
+            self.connect_suggestion_index %= matches.len();
+        }
         match key.code {
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.input.insert(self.input_cursor, c);
@@ -190,6 +199,22 @@ impl ChatScreen {
                 self.input_cursor = self.input[self.input_cursor..]
                     .find('\n')
                     .map_or(self.input.len(), |index| self.input_cursor + index);
+            }
+            KeyCode::Tab => {
+                if let Some((arg_start, matches)) = suggestions
+                    && let Some(connection) = matches.get(self.connect_suggestion_index)
+                {
+                    complete_connection(&mut self.input, &mut self.input_cursor, arg_start, connection);
+                }
+            }
+            KeyCode::Up if suggestions.as_ref().is_some_and(|(_, matches)| !matches.is_empty()) => {
+                self.connect_suggestion_index = self.connect_suggestion_index.saturating_sub(1);
+            }
+            KeyCode::Down if suggestions.as_ref().is_some_and(|(_, matches)| !matches.is_empty()) => {
+                if let Some((_, matches)) = &suggestions {
+                    self.connect_suggestion_index =
+                        (self.connect_suggestion_index + 1) % matches.len();
+                }
             }
             KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
             KeyCode::Down => self.scroll = self.scroll.saturating_add(1),
@@ -236,6 +261,7 @@ impl ChatScreen {
             "/analyze" => self.handle_analyze_command(text, query),
             "/explain" => self.handle_explain_command(text, query),
             "/relkind" => self.handle_relkind_command(text, query),
+            "/connect" => self.handle_connect_command(text, query),
             "/provider" => self.handle_provider_command(text, query),
             "/api-key" => self.handle_api_key_command(query),
             "/model" => self.handle_model_command(text, query),
@@ -248,6 +274,31 @@ impl ChatScreen {
             "/whoami" => self.handle_whoami_command(text),
             _ => None,
         }
+    }
+
+    fn handle_connect_command(&mut self, text: &str, query: &str) -> Option<ChatAction> {
+        self.messages.push(Message {
+            role: Role::User,
+            content: text.to_owned(),
+        });
+        let target = query.trim();
+        let connections = self.config.connections();
+        let Some(connection) = find_connection(target, &connections) else {
+            self.messages.push(Message {
+                role: Role::Error,
+                content: if target.is_empty() {
+                    "Usage: /connect <login@server>".to_owned()
+                } else {
+                    format!("No saved connection matches '{target}'.")
+                },
+            });
+            return None;
+        };
+        Some(ChatAction::Connect(connection))
+    }
+
+    fn connect_suggestions(&self) -> Option<(usize, Vec<String>)> {
+        connection_suggestions(&self.input, self.input_cursor, &self.config.connections())
     }
 
     fn handle_analyze_command(&mut self, text: &str, query: &str) -> Option<ChatAction> {
@@ -432,7 +483,7 @@ impl ChatScreen {
     }
 
     fn handle_help_command(&mut self, text: &str) -> Option<ChatAction> {
-        let reply = "Commands: /help (this message), /settings or Ctrl+S (open settings), /api-key <key> (set API key of current provider), /model [name] (show, list or switch model), /provider <name> (switch AI provider), /whoami (show connection info), /explain <query> (explain query plan), /analyze <query> (analyze query plan and schemas), /relkind <schema.relation> (get relation kind). \
+        let reply = "Commands: /help (this message), /settings or Ctrl+S (open settings), /connect <login@server> (switch database connection), /api-key <key> (set API key of current provider), /model [name] (show, list or switch model), /provider <name> (switch AI provider), /whoami (show connection info), /explain <query> (explain query plan), /analyze <query> (analyze query plan and schemas), /relkind <schema.relation> (get relation kind). \
                  Anything else is sent to PostgreSQL as SQL.";
         self.messages.push(Message {
             role: Role::User,
@@ -478,6 +529,42 @@ impl ChatScreen {
                 role: Role::Error,
                 content: err,
             }),
+        }
+    }
+
+    pub fn on_connect_result(&mut self, conn: Connection, result: Result<Client, String>) -> bool {
+        self.busy = false;
+        match result {
+            Ok(client) => {
+                self.config.set_default_connection(&conn);
+                self.conn = conn;
+                self.client = Arc::new(client);
+                self.messages.push(Message {
+                    role: Role::System,
+                    content: format!(
+                        "Connected to '{}' as {}@{}:{}/{}.",
+                        self.conn.name,
+                        self.conn.login,
+                        self.conn.host,
+                        self.conn.port,
+                        self.conn.catalog
+                    ),
+                });
+                if let Err(error) = self.config.write() {
+                    self.messages.push(Message {
+                        role: Role::Error,
+                        content: format!("failed to save default connection: {error}"),
+                    });
+                }
+                true
+            }
+            Err(error) => {
+                self.messages.push(Message {
+                    role: Role::Error,
+                    content: format!("failed to connect: {error}"),
+                });
+                false
+            }
         }
     }
 
@@ -657,6 +744,83 @@ impl ChatScreen {
         frame.render_widget(input, chunks[2]);
 
         self.draw_token_usage(frame, &chunks[2], input_title);
+        if let Some((_, matches)) = self.connect_suggestions()
+            && !matches.is_empty()
+        {
+            self.draw_connect_suggestions(frame, area, chunks[2], cursor_line, &matches);
+        }
+    }
+
+    fn draw_connect_suggestions(
+        &self,
+        frame: &mut Frame<'_>,
+        screen_area: Rect,
+        input_area: Rect,
+        cursor_line: usize,
+        matches: &[String],
+    ) {
+        let visible_count = matches.len().min(5);
+        let selected_index = self.connect_suggestion_index.min(matches.len() - 1);
+        let start = selected_index
+            .saturating_sub(visible_count.saturating_sub(1))
+            .min(matches.len().saturating_sub(visible_count));
+        let visible = &matches[start..start + visible_count];
+        let text_width = visible
+            .iter()
+            .map(|connection| connection.chars().count())
+            .max()
+            .unwrap_or(1);
+        let width = text_width
+            .saturating_add(4)
+            .min(screen_area.width as usize) as u16;
+        let display_width = width.saturating_sub(4) as usize;
+        let height = (visible_count as u16 + 2).min(screen_area.height);
+        let cursor_start = line_ranges(&self.input)
+            .get(cursor_line)
+            .map_or(0, |(start, _, _)| *start);
+        let cursor_x = input_area
+            .x
+            .saturating_add(3)
+            .saturating_add(
+                self.input[cursor_start..self.input_cursor]
+                    .chars()
+                    .count() as u16,
+            );
+        let cursor_y = input_area.y.saturating_add(1 + cursor_line as u16);
+        let x = cursor_x
+            .min(screen_area.right().saturating_sub(width))
+            .max(screen_area.x);
+        let y = if cursor_y.saturating_add(1 + height) <= screen_area.bottom() {
+            cursor_y.saturating_add(1)
+        } else {
+            cursor_y.saturating_sub(height).max(screen_area.y)
+        };
+        let popup = Rect::new(x, y, width, height);
+        let lines: Vec<Line> = visible
+            .iter()
+            .enumerate()
+            .map(|(index, connection)| {
+                let style = if start + index == selected_index {
+                    Style::default()
+                        .fg(theme::BG)
+                        .bg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme::TEXT).bg(theme::BG)
+                };
+                Line::from(Span::styled(
+                    format!(" {connection:<display_width$} "),
+                    style,
+                ))
+            })
+            .collect();
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::ACCENT_DIM))
+            .style(Style::default().bg(theme::BG))
+            .title(" connections ");
+        frame.render_widget(Clear, popup);
+        frame.render_widget(Paragraph::new(lines).block(block), popup);
     }
 
     fn draw_analysis_preview(&self, frame: &mut Frame<'_>, area: Rect, preview: &str) {
@@ -706,6 +870,59 @@ impl ChatScreen {
 }
 
 /// Lay out names in column-major order, fitting within `width` characters.
+fn connection_suggestions(
+    input: &str,
+    cursor: usize,
+    connections: &[Connection],
+) -> Option<(usize, Vec<String>)> {
+    const COMMAND: &str = "/connect";
+    if !input.starts_with(COMMAND) {
+        return None;
+    }
+    let suffix = &input[COMMAND.len()..];
+    if suffix
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_ascii_whitespace())
+    {
+        return None;
+    }
+    let whitespace_len = suffix.len() - suffix.trim_start().len();
+    let arg_start = COMMAND.len() + whitespace_len;
+    if cursor < arg_start || cursor > input.len() {
+        return None;
+    }
+    let query = input[arg_start..]
+        .split_ascii_whitespace()
+        .next()
+        .unwrap_or_default();
+    let mut matches: Vec<String> = connections
+        .iter()
+        .map(Connection::selector)
+        .filter(|selector| selector.starts_with(query))
+        .collect();
+    matches.sort();
+    matches.dedup();
+    Some((arg_start, matches))
+}
+
+fn find_connection(target: &str, connections: &[Connection]) -> Option<Connection> {
+    connections
+        .iter()
+        .find(|connection| connection.selector() == target)
+        .cloned()
+}
+
+fn complete_connection(input: &mut String, cursor: &mut usize, arg_start: usize, selector: &str) {
+    let completion = if input == "/connect" {
+        format!(" {selector}")
+    } else {
+        selector.to_owned()
+    };
+    input.replace_range(arg_start.., &completion);
+    *cursor = input.len();
+}
+
 fn format_columns(names: &[String], width: usize) -> String {
     let widths: Vec<usize> = names.iter().map(|name| name.chars().count()).collect();
     let cell = widths.iter().copied().max().unwrap_or(0) + 2;
@@ -780,7 +997,11 @@ fn next_char_boundary(text: &str, cursor: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{insert_at_cursor, line_ranges, take_query};
+    use super::{
+        complete_connection, connection_suggestions, find_connection, insert_at_cursor,
+        line_ranges, take_query,
+    };
+    use crate::config::Connection;
 
     #[test]
     fn paste_preserves_cr_and_lf_at_cursor() {
@@ -817,6 +1038,55 @@ mod tests {
             .collect();
 
         assert_eq!(lines, ["one", "two", "three", "four"]);
+    }
+
+    #[test]
+    fn connect_suggestions_filter_login_at_server_selectors() {
+        let mut alice = Connection::with_defaults("warehouse");
+        alice.login = "alice".to_owned();
+        let mut alicia = Connection::with_defaults("analytics");
+        alicia.login = "alicia".to_owned();
+        let mut bob = Connection::with_defaults("warehouse");
+        bob.login = "bob".to_owned();
+        let connections = [alice, alicia, bob];
+        let input = "/connect alicia@";
+
+        let (arg_start, matches) = connection_suggestions(input, input.len(), &connections)
+            .expect("connect command should show suggestions");
+
+        assert_eq!(arg_start, "/connect ".len());
+        assert_eq!(matches, ["alicia@analytics"]);
+    }
+
+    #[test]
+    fn connect_suggestions_require_command_boundary_and_argument_cursor() {
+        let connection = Connection::with_defaults("warehouse");
+        assert!(connection_suggestions("/connected", 10, &[connection.clone()]).is_none());
+        assert!(connection_suggestions("/connect alice", 8, &[connection]).is_none());
+    }
+
+    #[test]
+    fn connect_command_matches_an_exact_saved_selector() {
+        let mut connection = Connection::with_defaults("warehouse");
+        connection.login = "alice".to_owned();
+        let connections = [connection.clone()];
+
+        assert_eq!(
+            find_connection("alice@warehouse", &connections).map(|conn| conn.selector()),
+            Some("alice@warehouse".to_owned())
+        );
+        assert!(find_connection("ali@warehouse", &connections).is_none());
+    }
+
+    #[test]
+    fn tab_completion_adds_command_separator_when_missing() {
+        let mut input = "/connect".to_owned();
+        let mut cursor = input.len();
+
+        complete_connection(&mut input, &mut cursor, "/connect".len(), "alice@warehouse");
+
+        assert_eq!(input, "/connect alice@warehouse");
+        assert_eq!(cursor, input.len());
     }
 }
 

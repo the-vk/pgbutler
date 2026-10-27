@@ -47,14 +47,23 @@ pub struct App {
 }
 
 impl App {
-    /// Build the initial app state: skip straight to the connection setup
-    /// wizard if no connection profiles exist yet, otherwise open the first
-    /// saved connection directly.
+    /// Build the initial app state, preferring the saved default connection.
     pub fn new(config: Arc<config::Config>) -> Self {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let connections = config.connections();
+        let default_connection = config.default_connection();
 
-        let screen = if let Some(conn) = connections.into_iter().next() {
+        let selected = default_connection
+            .as_ref()
+            .and_then(|selector| {
+                connections
+                    .iter()
+                    .find(|connection| connection.selector() == *selector)
+                    .cloned()
+            })
+            .or_else(|| connections.into_iter().next());
+
+        let screen = if let Some(conn) = selected {
             let mut setup = SetupScreen::from_connection(conn);
             setup.autoconnect = true;
             Screen::Setup(setup)
@@ -133,6 +142,7 @@ impl App {
                         if let Some(action) = chat.handle_key(key) {
                             match action {
                                 ChatAction::Query(sql) => self.spawn_query(sql),
+                                ChatAction::Connect(conn) => self.spawn_connect(conn),
                                 ChatAction::Explain(sql) => self.spawn_explain(sql),
                                 ChatAction::Analyze(sql) => self.spawn_analyze(sql),
                                 ChatAction::RelKind(schema, relation) => {
@@ -158,18 +168,31 @@ impl App {
 
     fn handle_app_event(&mut self, event: AppEvent) {
         match event {
-            AppEvent::ConnectResult { conn, result } => {
-                if let Screen::Setup(setup) = &mut self.screen {
+            AppEvent::ConnectResult { conn, result } => match &mut self.screen {
+                Screen::Setup(setup) => {
                     setup.connecting = false;
                     match result {
                         Ok(client) => {
                             if let Err(error) = self.config.save_connection(&conn) {
                                 log::warn!("Failed to save connection profile: {error}");
                             }
-                            self.screen = Screen::Chat(ChatScreen::new(*conn, client, Arc::clone(&self.config)));
+                            self.config.set_default_connection(&conn);
+                            if let Err(error) = self.config.write() {
+                                log::warn!("Failed to save default connection: {error}");
+                            }
+                            self.screen = Screen::Chat(ChatScreen::new(
+                                *conn,
+                                client,
+                                Arc::clone(&self.config),
+                            ));
                             self.spawn_fetch_models();
                         }
                         Err(err) => setup.error = Some(err),
+                    }
+                }
+                Screen::Chat(chat) => {
+                    if chat.on_connect_result(*conn, result) {
+                        self.spawn_fetch_models();
                     }
                 }
             }

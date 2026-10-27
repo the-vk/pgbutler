@@ -11,11 +11,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::config::{
-    AnthropicConfig, Config, Connection, OllamaConfig, OpenAiConfig, ProviderConfig,
+    AnthropicConfig, Config, LoginConfig, OllamaConfig, OpenAiConfig, ProviderConfig, ServerConfig,
+    SslMode,
 };
 use crate::theme;
 use crate::ui::draw_banner;
-use crate::ui::setup::{connection_form, connection_from_form};
 use crate::ui::widgets::{Form, draw_menu};
 
 const PROVIDERS: [&str; 3] = ["ollama", "anthropic", "openai"];
@@ -38,11 +38,28 @@ pub enum SettingsEvent {
 enum Node {
     Root,
     Connections,
-    Connection(String),
+    ServerLogins(String),
+    ServerForm {
+        original_name: Option<String>,
+    },
+    LoginForm {
+        server_name: String,
+        index: Option<usize>,
+    },
     App,
     Provider(&'static str),
     /// Model list of the provider whose form is one level up.
     Models(&'static str),
+}
+
+#[derive(Clone)]
+enum DeleteConfirmation {
+    Server(String),
+    Login {
+        server_name: String,
+        index: usize,
+        label: String,
+    },
 }
 
 struct Level {
@@ -70,7 +87,7 @@ pub struct SettingsScreen {
     config: Arc<Config>,
     path: Vec<Level>,
     error: Option<String>,
-    delete_confirmation: Option<String>,
+    delete_confirmation: Option<DeleteConfirmation>,
     provider_dirty: bool,
 }
 
@@ -99,14 +116,27 @@ impl SettingsScreen {
     }
 
     fn menu_items(&self) -> Vec<String> {
-        match self.current().node {
+        match &self.current().node {
             Node::Root => ROOT_ITEMS.iter().map(ToString::to_string).collect(),
             Node::Connections => self
                 .config
-                .connections()
+                .servers()
                 .into_iter()
-                .map(|c| c.name)
+                .map(|server| server.name)
                 .collect(),
+            Node::ServerLogins(name) => self
+                .config
+                .servers()
+                .into_iter()
+                .find(|server| &server.name == name)
+                .map(|server| {
+                    server
+                        .logins
+                        .iter()
+                        .map(|login| format!("{} / {}", login.login, login.catalog))
+                        .collect()
+                })
+                .unwrap_or_default(),
             Node::Models(_) => self.current().models.clone(),
             _ => Vec::new(),
         }
@@ -118,7 +148,11 @@ impl SettingsScreen {
             parts.push(match &level.node {
                 Node::Root => String::new(),
                 Node::Connections => "Connections".to_owned(),
-                Node::Connection(name) => name.clone(),
+                Node::ServerLogins(name) => name.clone(),
+                Node::ServerForm { original_name } => {
+                    original_name.as_deref().unwrap_or("New server").to_owned()
+                }
+                Node::LoginForm { .. } => "Login".to_owned(),
                 Node::App => "Application".to_owned(),
                 Node::Provider(name) => provider_title(name).to_owned(),
                 Node::Models(_) => "Model".to_owned(),
@@ -128,20 +162,24 @@ impl SettingsScreen {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsEvent {
-        if let Some(name) = self.delete_confirmation.clone() {
+        if let Some(target) = self.delete_confirmation.clone() {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Enter => {
                     self.delete_confirmation = None;
-                    match self.config.delete_connection(&name) {
+                    let result = match target {
+                        DeleteConfirmation::Server(name) => self.config.delete_server(&name),
+                        DeleteConfirmation::Login {
+                            server_name, index, ..
+                        } => self.config.delete_login(&server_name, index),
+                    };
+                    match result {
                         Ok(()) => {
                             let count = self.menu_items().len();
                             self.current_mut().selected =
                                 self.current().selected.min(count.saturating_sub(1));
                             self.error = None;
                         }
-                        Err(err) => {
-                            self.error = Some(format!("failed to delete connection: {err}"))
-                        }
+                        Err(err) => self.error = Some(format!("failed to delete entry: {err}")),
                     }
                 }
                 KeyCode::Char('n') | KeyCode::Esc => self.delete_confirmation = None,
@@ -172,12 +210,40 @@ impl SettingsScreen {
         let count = self.menu_items().len();
         match key.code {
             KeyCode::Char('+') if matches!(self.current().node, Node::Connections) => {
-                self.add_connection();
+                self.add_server();
             }
             KeyCode::Char('-') if matches!(self.current().node, Node::Connections) => {
                 if let Some(name) = self.menu_items().get(self.current().selected).cloned() {
-                    self.delete_confirmation = Some(name);
+                    self.delete_confirmation = Some(DeleteConfirmation::Server(name));
                     self.error = None;
+                }
+            }
+            KeyCode::Char('+') if matches!(self.current().node, Node::ServerLogins(_)) => {
+                if let Node::ServerLogins(name) = &self.current().node {
+                    self.add_login(name.clone());
+                }
+            }
+            KeyCode::Char('-') if matches!(self.current().node, Node::ServerLogins(_)) => {
+                if let Node::ServerLogins(server_name) = &self.current().node
+                    && let Some(label) = self.menu_items().get(self.current().selected).cloned()
+                {
+                    self.delete_confirmation = Some(DeleteConfirmation::Login {
+                        server_name: server_name.clone(),
+                        index: self.current().selected,
+                        label,
+                    });
+                    self.error = None;
+                }
+            }
+            KeyCode::Char('e') if matches!(self.current().node, Node::Connections) => {
+                if let Some(name) = self.menu_items().get(self.current().selected).cloned() {
+                    self.edit_server(&name);
+                }
+            }
+            KeyCode::Char('e') if matches!(self.current().node, Node::ServerLogins(_)) => {
+                if let Node::ServerLogins(name) = &self.current().node {
+                    let name = name.clone();
+                    self.edit_server(&name);
                 }
             }
             KeyCode::Down if count > 0 => {
@@ -195,21 +261,53 @@ impl SettingsScreen {
         SettingsEvent::None
     }
 
-    fn add_connection(&mut self) {
+    fn add_server(&mut self) {
         let existing: Vec<String> = self.menu_items();
-        let base_name = "new-connection";
+        let base_name = "new-server";
         let name = if !existing.iter().any(|name| name == base_name) {
             base_name.to_owned()
         } else {
             (2..)
                 .map(|suffix| format!("{base_name}-{suffix}"))
                 .find(|candidate| !existing.contains(candidate))
-                .expect("an unused connection name always exists")
+                .expect("an unused server name always exists")
         };
         self.error = None;
         self.path.push(Level::new(
-            Node::Connection(name.clone()),
-            Some(connection_form(Connection::with_defaults(name))),
+            Node::ServerForm {
+                original_name: None,
+            },
+            Some(server_form(&ServerConfig::with_defaults(name))),
+        ));
+    }
+
+    fn edit_server(&mut self, name: &str) {
+        let Some(server) = self
+            .config
+            .servers()
+            .into_iter()
+            .find(|server| server.name == name)
+        else {
+            self.error = Some(format!("server '{name}' not found"));
+            return;
+        };
+        self.error = None;
+        self.path.push(Level::new(
+            Node::ServerForm {
+                original_name: Some(name.to_owned()),
+            },
+            Some(server_form(&server)),
+        ));
+    }
+
+    fn add_login(&mut self, server_name: String) {
+        self.error = None;
+        self.path.push(Level::new(
+            Node::LoginForm {
+                server_name,
+                index: None,
+            },
+            Some(login_form(&LoginConfig::with_defaults())),
         ));
     }
 
@@ -281,16 +379,25 @@ impl SettingsScreen {
 
     fn enter(&mut self) {
         let selected = self.current().selected;
-        let node = match self.current().node {
+        let node = match self.current().node.clone() {
             Node::Root => match selected {
                 0 => Node::Connections,
                 1 => Node::App,
                 n => Node::Provider(PROVIDERS[n - 2]),
             },
             Node::Connections => match self.menu_items().into_iter().nth(selected) {
-                Some(name) => Node::Connection(name),
+                Some(name) => Node::ServerLogins(name),
                 None => return,
             },
+            Node::ServerLogins(server_name) => {
+                if selected >= self.menu_items().len() {
+                    return;
+                }
+                Node::LoginForm {
+                    server_name,
+                    index: Some(selected),
+                }
+            }
             _ => return,
         };
         let form = match self.build_form(&node) {
@@ -306,15 +413,28 @@ impl SettingsScreen {
 
     fn build_form(&self, node: &Node) -> Result<Option<Form>, String> {
         Ok(match node {
-            Node::Root | Node::Connections | Node::Models(_) => None,
-            Node::Connection(name) => {
-                let conn = self
+            Node::Root
+            | Node::Connections
+            | Node::ServerLogins(_)
+            | Node::ServerForm { .. }
+            | Node::Models(_) => None,
+            Node::LoginForm { server_name, index } => {
+                let server = self
                     .config
-                    .connections()
+                    .servers()
                     .into_iter()
-                    .find(|c| &c.name == name)
-                    .ok_or_else(|| format!("connection '{name}' not found"))?;
-                Some(connection_form(conn).readonly(0))
+                    .find(|server| &server.name == server_name)
+                    .ok_or_else(|| format!("server '{server_name}' not found"))?;
+                let login = if let Some(index) = index {
+                    server
+                        .logins
+                        .get(*index)
+                        .cloned()
+                        .ok_or_else(|| "login not found".to_owned())?
+                } else {
+                    LoginConfig::with_defaults()
+                };
+                Some(login_form(&login))
             }
             Node::App => Some(
                 Form::new(
@@ -362,17 +482,71 @@ impl SettingsScreen {
     }
 
     fn apply(&mut self) -> Result<(), String> {
-        let level = self.current();
-        let Some(form) = &level.form else {
+        let node = self.current().node.clone();
+        let Some(form) = self.current().form.as_ref() else {
             return Ok(());
         };
-        match &level.node {
-            Node::Connection(_) => {
-                let conn = connection_from_form(form)?;
-                conn.validate()?;
+        match node {
+            Node::ServerForm { original_name } => {
+                let old_server = original_name.as_deref().and_then(|name| {
+                    self.config
+                        .servers()
+                        .into_iter()
+                        .find(|server| server.name == name)
+                });
+                let logins = old_server
+                    .as_ref()
+                    .map(|server| server.logins.clone())
+                    .unwrap_or_default();
+                let server = server_from_form(form, logins)?;
+                if server.name.trim().is_empty() {
+                    return Err("server name must not be empty".into());
+                }
+                server.validate()?;
                 self.config
-                    .save_connection(&conn)
+                    .save_server(&server, original_name.as_deref())
                     .map_err(|e| e.to_string())?;
+                if let Some(old_name) = original_name.as_deref() {
+                    for level in &mut self.path {
+                        if let Node::ServerLogins(name) = &mut level.node
+                            && name == old_name
+                        {
+                            *name = server.name.clone();
+                        }
+                    }
+                }
+                let parent_index = self.path.len().saturating_sub(2);
+                if let Some(parent) = self.path.get_mut(parent_index)
+                    && matches!(parent.node, Node::Connections)
+                {
+                    parent.selected = self
+                        .config
+                        .servers()
+                        .iter()
+                        .position(|saved| saved.name == server.name)
+                        .unwrap_or(0);
+                }
+            }
+            Node::LoginForm { server_name, index } => {
+                let login = login_from_form(form)?;
+                login.validate()?;
+                self.config
+                    .save_login(&server_name, index, &login)
+                    .map_err(|e| e.to_string())?;
+                let parent_index = self.path.len().saturating_sub(2);
+                if let Some(parent) = self.path.get_mut(parent_index)
+                    && let Node::ServerLogins(name) = &parent.node
+                    && name == &server_name
+                {
+                    parent.selected = index.unwrap_or_else(|| {
+                        self.config
+                            .servers()
+                            .into_iter()
+                            .find(|server| server.name == server_name)
+                            .map(|server| server.logins.len().saturating_sub(1))
+                            .unwrap_or(0)
+                    });
+                }
             }
             Node::App => {
                 self.config.set_provider(&form.values[0])?;
@@ -383,7 +557,7 @@ impl SettingsScreen {
                 self.config.set_provider_config(config);
                 self.provider_dirty = true;
             }
-            Node::Root | Node::Connections | Node::Models(_) => {}
+            Node::Root | Node::Connections | Node::ServerLogins(_) | Node::Models(_) => {}
         }
         Ok(())
     }
@@ -429,7 +603,9 @@ impl SettingsScreen {
                 } else if matches!(level.node, Node::Models(_)) {
                     " ↑/↓ to select, Enter to confirm, Esc to cancel "
                 } else if matches!(level.node, Node::Connections) {
-                    " ↑/↓ to select, Enter to open, + to add, - to delete, Esc to go back "
+                    " ↑/↓ select, Enter logins, + server, - delete, e edit, Esc back "
+                } else if matches!(level.node, Node::ServerLogins(_)) {
+                    " ↑/↓ select, Enter edit login, + login, - delete, e server, Esc back "
                 } else {
                     " ↑/↓ to select, Enter to open, Esc to go back "
                 },
@@ -438,7 +614,7 @@ impl SettingsScreen {
         };
         frame.render_widget(Paragraph::new(Line::from(status)), chunks[2]);
 
-        if let Some(name) = &self.delete_confirmation {
+        if let Some(target) = &self.delete_confirmation {
             let popup_rows = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -456,21 +632,95 @@ impl SettingsScreen {
                 ])
                 .split(popup_rows[1]);
             let popup = popup_columns[1];
+            let message = match target {
+                DeleteConfirmation::Server(name) => format!("Delete server '{name}'?"),
+                DeleteConfirmation::Login { label, .. } => format!("Delete login '{label}'?"),
+            };
             frame.render_widget(Clear, popup);
             frame.render_widget(
-                Paragraph::new(format!(
-                    "Delete connection '{name}'?\ny/Enter: confirm   n/Esc: cancel"
-                ))
-                .alignment(Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Confirm deletion "),
-                ),
+                Paragraph::new(format!("{message}\ny/Enter: confirm   n/Esc: cancel"))
+                    .alignment(Alignment::Center)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(" Confirm deletion "),
+                    ),
                 popup,
             );
         }
     }
+}
+
+const SERVER_FIELDS: [&str; 7] = [
+    "Server name",
+    "IP address / host",
+    "Port",
+    "SSL mode",
+    "Root CA cert (sslrootcert)",
+    "Client cert (sslcert)",
+    "Client key (sslkey)",
+];
+
+const LOGIN_FIELDS: [&str; 3] = ["Login", "Password", "Catalog name"];
+
+fn server_form(server: &ServerConfig) -> Form {
+    Form::new(
+        "Server",
+        &SERVER_FIELDS,
+        vec![
+            server.name.clone(),
+            server.host.clone(),
+            server.port.to_string(),
+            server.sslmode.to_string(),
+            server.sslrootcert.clone().unwrap_or_default(),
+            server.sslcert.clone().unwrap_or_default(),
+            server.sslkey.clone().unwrap_or_default(),
+        ],
+    )
+    .choice(3, SslMode::ALL.iter().map(ToString::to_string).collect())
+}
+
+fn server_from_form(form: &Form, logins: Vec<LoginConfig>) -> Result<ServerConfig, String> {
+    let values = &form.values;
+    let port = values[2]
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| format!("invalid port '{}': must be a number 1-65535", values[2]))?;
+    let optional = |value: &str| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_owned())
+    };
+    Ok(ServerConfig {
+        name: values[0].trim().to_owned(),
+        host: values[1].trim().to_owned(),
+        port,
+        sslmode: values[3].parse()?,
+        sslrootcert: optional(&values[4]),
+        sslcert: optional(&values[5]),
+        sslkey: optional(&values[6]),
+        logins,
+    })
+}
+
+fn login_form(login: &LoginConfig) -> Form {
+    Form::new(
+        "Login",
+        &LOGIN_FIELDS,
+        vec![
+            login.login.clone(),
+            login.password.clone(),
+            login.catalog.clone(),
+        ],
+    )
+    .masked(1)
+}
+
+fn login_from_form(form: &Form) -> Result<LoginConfig, String> {
+    Ok(LoginConfig {
+        login: form.values[0].trim().to_owned(),
+        password: form.values[1].clone(),
+        catalog: form.values[2].trim().to_owned(),
+    })
 }
 
 fn provider_title(name: &str) -> &'static str {
