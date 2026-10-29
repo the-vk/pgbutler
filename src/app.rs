@@ -142,6 +142,7 @@ impl App {
                         if let Some(action) = chat.handle_key(key) {
                             match action {
                                 ChatAction::Query(sql) => self.spawn_query(sql),
+                                ChatAction::Quit => self.should_quit = true,
                                 ChatAction::Connect(conn) => self.spawn_connect(conn),
                                 ChatAction::Explain(sql) => self.spawn_explain(sql),
                                 ChatAction::Analyze(sql) => self.spawn_analyze(sql),

@@ -31,9 +31,10 @@ pub struct Message {
     pub content: String,
 }
 
-/// Action to execute in the background when the user submits input.
+/// Action triggered when the user submits input.
 pub enum ChatAction {
     Query(String),
+    Quit,
     Connect(Connection),
     Explain(String),
     Analyze(String),
@@ -271,6 +272,7 @@ impl ChatScreen {
 
     fn match_command(&mut self, text: &str, command: &str, query: &str) -> Option<ChatAction> {
         match command {
+            command if is_exit_command(command) => Some(ChatAction::Quit),
             "/analyze" => self.handle_analyze_command(text, query),
             "/explain" => self.handle_explain_command(text, query),
             "/relkind" => self.handle_relkind_command(text, query),
@@ -496,7 +498,7 @@ impl ChatScreen {
     }
 
     fn handle_help_command(&mut self, text: &str) -> Option<ChatAction> {
-        let reply = "Commands: /help (this message), /settings or Ctrl+S (open settings), /connect <login@server> (switch database connection), /api-key <key> (set API key of current provider), /model [name] (show, list or switch model), /provider <name> (switch AI provider), /whoami (show connection info), /explain <query> (explain query plan), /analyze <query> (analyze query plan and schemas), /relkind <schema.relation> (get relation kind). \
+        let reply = "Commands: /help (this message), /exit or /quit (exit the app), /settings or Ctrl+S (open settings), /connect <login@server> (switch database connection), /api-key <key> (set API key of current provider), /model [name] (show, list or switch model), /provider <name> (switch AI provider), /whoami (show connection info), /explain <query> (explain query plan), /analyze <query> (analyze query plan and schemas), /relkind <schema.relation> (get relation kind). \
                  Anything else is sent to PostgreSQL as SQL.";
         self.messages.push(Message {
             role: Role::User,
@@ -952,6 +954,10 @@ fn format_columns(names: &[String], width: usize) -> String {
     lines.join("\n")
 }
 
+fn is_exit_command(command: &str) -> bool {
+    matches!(command, "/exit" | "/quit")
+}
+
 fn previous_char_boundary(text: &str, cursor: usize) -> usize {
     text[..cursor]
         .char_indices()
@@ -1006,7 +1012,7 @@ fn next_char_boundary(text: &str, cursor: usize) -> usize {
 mod tests {
     use super::{
         complete_connection, connection_suggestions, find_connection, insert_at_cursor,
-        line_ranges, take_query,
+        is_exit_command, line_ranges, take_query,
     };
     use crate::config::Connection;
 
@@ -1045,6 +1051,13 @@ mod tests {
             .collect();
 
         assert_eq!(lines, ["one", "two", "three", "four"]);
+    }
+
+    #[test]
+    fn exit_command_accepts_only_exit_and_quit() {
+        assert!(is_exit_command("/exit"));
+        assert!(is_exit_command("/quit"));
+        assert!(!is_exit_command("/exiting"));
     }
 
     #[test]
