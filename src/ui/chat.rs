@@ -204,13 +204,26 @@ impl ChatScreen {
                 if let Some((arg_start, matches)) = suggestions
                     && let Some(connection) = matches.get(self.connect_suggestion_index)
                 {
-                    complete_connection(&mut self.input, &mut self.input_cursor, arg_start, connection);
+                    complete_connection(
+                        &mut self.input,
+                        &mut self.input_cursor,
+                        arg_start,
+                        connection,
+                    );
                 }
             }
-            KeyCode::Up if suggestions.as_ref().is_some_and(|(_, matches)| !matches.is_empty()) => {
+            KeyCode::Up
+                if suggestions
+                    .as_ref()
+                    .is_some_and(|(_, matches)| !matches.is_empty()) =>
+            {
                 self.connect_suggestion_index = self.connect_suggestion_index.saturating_sub(1);
             }
-            KeyCode::Down if suggestions.as_ref().is_some_and(|(_, matches)| !matches.is_empty()) => {
+            KeyCode::Down
+                if suggestions
+                    .as_ref()
+                    .is_some_and(|(_, matches)| !matches.is_empty()) =>
+            {
                 if let Some((_, matches)) = &suggestions {
                     self.connect_suggestion_index =
                         (self.connect_suggestion_index + 1) % matches.len();
@@ -770,9 +783,7 @@ impl ChatScreen {
             .map(|connection| connection.chars().count())
             .max()
             .unwrap_or(1);
-        let width = text_width
-            .saturating_add(4)
-            .min(screen_area.width as usize) as u16;
+        let width = text_width.saturating_add(4).min(screen_area.width as usize) as u16;
         let display_width = width.saturating_sub(4) as usize;
         let height = (visible_count as u16 + 2).min(screen_area.height);
         let cursor_start = line_ranges(&self.input)
@@ -781,11 +792,7 @@ impl ChatScreen {
         let cursor_x = input_area
             .x
             .saturating_add(3)
-            .saturating_add(
-                self.input[cursor_start..self.input_cursor]
-                    .chars()
-                    .count() as u16,
-            );
+            .saturating_add(self.input[cursor_start..self.input_cursor].chars().count() as u16);
         let cursor_y = input_area.y.saturating_add(1 + cursor_line as u16);
         let x = cursor_x
             .min(screen_area.right().saturating_sub(width))

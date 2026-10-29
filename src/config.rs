@@ -615,6 +615,9 @@ impl ServerConfig {
         if self.port == 0 {
             return Err("port must be between 1 and 65535".into());
         }
+        if !self.sslmode.uses_tls() {
+            return Ok(());
+        }
         check_cert_path(
             "root CA certificate (sslrootcert)",
             &self.sslrootcert,
@@ -641,8 +644,14 @@ impl ServerConfig {
 }
 
 impl Default for ServerConfig {
+    // Used by serde for absent fields: certs must stay unset, unlike `with_defaults`.
     fn default() -> Self {
-        Self::with_defaults(String::new())
+        Self {
+            sslrootcert: None,
+            sslcert: None,
+            sslkey: None,
+            ..Self::with_defaults(String::new())
+        }
     }
 }
 
@@ -1060,6 +1069,25 @@ sslmode = "disable"
         let deserialized: ServerConfig =
             toml::from_str(&serialized).expect("deserialization should succeed");
         assert!(deserialized.logins[0].password.is_empty());
+    }
+
+    #[test]
+    fn absent_cert_fields_stay_empty_when_loading_a_server() {
+        let server: ServerConfig = toml::from_str("name = \"s\"\nhost = \"h\"\nport = 5432\n")
+            .expect("server should load");
+        assert!(server.sslrootcert.is_none());
+        assert!(server.sslcert.is_none());
+        assert!(server.sslkey.is_none());
+    }
+
+    #[test]
+    fn disable_sslmode_ignores_configured_cert_paths() {
+        let mut server = ServerConfig::with_defaults("s");
+        server.sslmode = SslMode::Disable;
+        server.sslrootcert = Some("/nonexistent/root.crt".to_owned());
+        server.sslcert = Some("/nonexistent/client.crt".to_owned());
+        server.sslkey = None;
+        assert!(server.validate().is_ok());
     }
 
     #[test]
