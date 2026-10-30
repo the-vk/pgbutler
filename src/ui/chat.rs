@@ -36,6 +36,7 @@ pub enum ChatAction {
     Quit,
     Connect(Connection),
     Explain(String),
+    IndexStatsReport,
     Analyze(String),
     RelKind(String, String),
     /// Provider changed; reload its model list.
@@ -287,6 +288,14 @@ impl ChatScreen {
             }
             "/help" => self.handle_help_command(text),
             "/collect-index-stats" => self.handle_collect_index_stats_command(text, query),
+            "/report-index-stats" => {
+                self.messages.push(Message {
+                    role: Role::User,
+                    content: text.to_owned(),
+                });
+                self.busy = true;
+                Some(ChatAction::IndexStatsReport)
+            }
             "/whoami" => self.handle_whoami_command(text),
             _ => None,
         }
@@ -502,7 +511,7 @@ impl ChatScreen {
     }
 
     fn handle_help_command(&mut self, text: &str) -> Option<ChatAction> {
-        let reply = "Commands: /help (this message), /exit or /quit (exit the app), /settings or Ctrl+S (open settings), /connect <login@server> (switch database connection), /api-key <key> (set API key of current provider), /model [name] (show, list or switch model), /provider <name> (switch AI provider), /collect-index-stats <true|false> (toggle index statistics collection), /whoami (show connection info), /explain <query> (explain query plan), /analyze <query> (analyze query plan and schemas), /relkind <schema.relation> (get relation kind). \
+        let reply = "Commands: /help (this message), /exit or /quit (exit the app), /settings or Ctrl+S (open settings), /connect <login@server> (switch database connection), /api-key <key> (set API key of current provider), /model [name] (show, list or switch model), /provider <name> (switch AI provider), /collect-index-stats <true|false> (toggle index statistics collection), /report-index-stats (index usage table with scan velocity), /whoami (show connection info), /explain <query> (explain query plan), /analyze <query> (analyze query plan and schemas), /relkind <schema.relation> (get relation kind). \
                  Anything else is sent to PostgreSQL as SQL.";
         self.messages.push(Message {
             role: Role::User,

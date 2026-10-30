@@ -27,7 +27,7 @@ use crate::config::{self, Config, Connection};
 
 mod store;
 
-pub use store::{Store, StoreError};
+pub use store::{IndexReportRow, Store, StoreError};
 
 /// Tabular (or status) outcome of running a query via the simple query protocol.
 #[derive(Debug, Default, Clone)]
@@ -96,6 +96,51 @@ impl DbConnection {
 
     pub fn config(&self) -> &Connection {
         &self.config
+    }
+
+    /// Table of the latest index statistics with scan velocity (scans per hour,
+    /// averaged over the last 1h, 6h, 24h and 7d).
+    pub async fn index_stats_report(&self) -> Result<QueryOutcome, DbError> {
+        let rows = self.store.index_stats_report().await?;
+        let mut columns: Vec<String> = [
+            "schema",
+            "table",
+            "index",
+            "idx_scan",
+            "idx_tup_read",
+            "idx_tup_fetch",
+            "last_idx_scan",
+        ]
+        .map(str::to_owned)
+        .into();
+        columns.extend(
+            store::VELOCITY_WINDOWS
+                .iter()
+                .map(|(label, _)| format!("scans/h {label}")),
+        );
+        let rows = rows
+            .into_iter()
+            .map(|row| {
+                let mut cells = vec![
+                    row.schemaname,
+                    row.relname,
+                    row.indexrelname,
+                    row.idx_scan.to_string(),
+                    row.idx_tup_read.to_string(),
+                    row.idx_tup_fetch.to_string(),
+                    row.last_idx_scan.unwrap_or_else(|| "-".to_owned()),
+                ];
+                cells.extend(row.scans_per_hour.iter().map(|velocity| {
+                    velocity.map_or_else(|| "-".to_owned(), |v| format!("{v:.2}"))
+                }));
+                cells
+            })
+            .collect();
+        Ok(QueryOutcome {
+            columns,
+            rows,
+            statuses: Vec::new(),
+        })
     }
 
     /// Whether the background index statistics sampler is running.
