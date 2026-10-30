@@ -659,6 +659,7 @@ impl ServerConfig {
             catalog: login.catalog.clone(),
             login: login.login.clone(),
             password: login.password.clone(),
+            collect_index_stats: login.collect_index_stats,
             sslmode: self.sslmode,
             sslrootcert: self.sslrootcert.clone(),
             sslcert: self.sslcert.clone(),
@@ -728,6 +729,8 @@ pub struct LoginConfig {
         deserialize_with = "deserialize_password"
     )]
     pub password: String,
+    /// Periodically sample index usage statistics into the local store.
+    pub collect_index_stats: bool,
 }
 
 impl LoginConfig {
@@ -736,6 +739,7 @@ impl LoginConfig {
             catalog: "postgres".to_string(),
             login: whoami_fallback(),
             password: String::new(),
+            collect_index_stats: false,
         }
     }
 
@@ -744,6 +748,7 @@ impl LoginConfig {
             catalog: conn.catalog.clone(),
             login: conn.login.clone(),
             password: conn.password.clone(),
+            collect_index_stats: conn.collect_index_stats,
         }
     }
 
@@ -773,6 +778,7 @@ pub struct Connection {
     pub catalog: String,
     pub login: String,
     pub password: String,
+    pub collect_index_stats: bool,
     pub sslmode: SslMode,
     pub sslrootcert: Option<String>,
     pub sslcert: Option<String>,
@@ -924,6 +930,7 @@ fn parse_server_profile(contents: &str) -> Option<ServerConfig> {
                 catalog: legacy.catalog,
                 login: legacy.login,
                 password: legacy.password,
+                collect_index_stats: false,
             });
             server
         })
@@ -1073,6 +1080,7 @@ sslmode = "disable"
             catalog: "inventory".to_owned(),
             login: "analyst".to_owned(),
             password: "secret".to_owned(),
+            collect_index_stats: false,
         });
         let config = Config {
             servers: RwLock::new(vec![server]),

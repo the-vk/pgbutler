@@ -73,7 +73,7 @@ impl ChatScreen {
             ),
         });
         let db = Arc::new(db);
-        db.spawn_index_stats_collector();
+        db.set_index_stats_collection(db.config().collect_index_stats);
         Self {
             db,
             config,
@@ -286,6 +286,7 @@ impl ChatScreen {
                 None
             }
             "/help" => self.handle_help_command(text),
+            "/collect-index-stats" => self.handle_collect_index_stats_command(text, query),
             "/whoami" => self.handle_whoami_command(text),
             _ => None,
         }
@@ -501,7 +502,7 @@ impl ChatScreen {
     }
 
     fn handle_help_command(&mut self, text: &str) -> Option<ChatAction> {
-        let reply = "Commands: /help (this message), /exit or /quit (exit the app), /settings or Ctrl+S (open settings), /connect <login@server> (switch database connection), /api-key <key> (set API key of current provider), /model [name] (show, list or switch model), /provider <name> (switch AI provider), /whoami (show connection info), /explain <query> (explain query plan), /analyze <query> (analyze query plan and schemas), /relkind <schema.relation> (get relation kind). \
+        let reply = "Commands: /help (this message), /exit or /quit (exit the app), /settings or Ctrl+S (open settings), /connect <login@server> (switch database connection), /api-key <key> (set API key of current provider), /model [name] (show, list or switch model), /provider <name> (switch AI provider), /collect-index-stats <true|false> (toggle index statistics collection), /whoami (show connection info), /explain <query> (explain query plan), /analyze <query> (analyze query plan and schemas), /relkind <schema.relation> (get relation kind). \
                  Anything else is sent to PostgreSQL as SQL.";
         self.messages.push(Message {
             role: Role::User,
@@ -512,6 +513,45 @@ impl ChatScreen {
             content: reply.to_string(),
         });
         return None;
+    }
+
+    fn handle_collect_index_stats_command(&mut self, text: &str, arg: &str) -> Option<ChatAction> {
+        self.messages.push(Message {
+            role: Role::User,
+            content: text.to_owned(),
+        });
+        let enabled = match arg.trim() {
+            "true" => true,
+            "false" => false,
+            _ => {
+                let state = self.db.index_stats_collection_enabled();
+                self.messages.push(Message {
+                    role: Role::System,
+                    content: format!(
+                        "Index statistics collection is {}. Usage: /collect-index-stats <true|false>",
+                        if state { "enabled" } else { "disabled" }
+                    ),
+                });
+                return None;
+            }
+        };
+        let mut conn = self.db.config().clone();
+        conn.collect_index_stats = enabled;
+        self.db.set_index_stats_collection(enabled);
+        let content = match self.config.save_connection(&conn) {
+            Ok(_) => format!(
+                "Index statistics collection {}.",
+                if enabled { "enabled" } else { "disabled" }
+            ),
+            Err(error) => {
+                format!("Index statistics collection changed, but saving failed: {error}")
+            }
+        };
+        self.messages.push(Message {
+            role: Role::System,
+            content,
+        });
+        None
     }
 
     fn handle_whoami_command(&mut self, text: &str) -> Option<ChatAction> {
@@ -559,7 +599,8 @@ impl ChatScreen {
             Ok(db) => {
                 self.config.set_default_connection(db.config());
                 self.db = Arc::new(*db);
-                self.db.spawn_index_stats_collector();
+                self.db
+                    .set_index_stats_collection(self.db.config().collect_index_stats);
                 self.messages.push(Message {
                     role: Role::System,
                     content: format!(

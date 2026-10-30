@@ -98,11 +98,33 @@ impl DbConnection {
         &self.config
     }
 
+    /// Whether the background index statistics sampler is running.
+    pub fn index_stats_collection_enabled(&self) -> bool {
+        self.index_stats_task
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+
+    /// Starts or immediately aborts the background index statistics sampler.
+    pub fn set_index_stats_collection(self: &Arc<Self>, enabled: bool) {
+        if enabled {
+            self.spawn_index_stats_collector();
+        } else if let Some(task) = self
+            .index_stats_task
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            task.abort();
+        }
+    }
+
     /// Starts a background task that samples index usage statistics into the
-    /// local store whenever the latest sample is older than
-    /// the configured index statistics interval. The task is stored in the connection and
-    /// aborted when the connection is dropped; calling this again replaces it.
-    pub fn spawn_index_stats_collector(self: &Arc<Self>) {
+    /// local store whenever the latest sample is older than the configured
+    /// interval. The task is stored in the connection and aborted when the
+    /// connection is dropped; calling this again replaces it.
+    fn spawn_index_stats_collector(self: &Arc<Self>) {
         let db = Arc::downgrade(self);
         let task = tokio::spawn(async move {
             loop {

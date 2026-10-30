@@ -13,7 +13,7 @@ use crate::theme;
 use crate::ui::draw_banner;
 use crate::ui::widgets::Form;
 
-const FIELD_LABELS: [&str; 10] = [
+const FIELD_LABELS: [&str; 11] = [
     "Connection name",
     "Host",
     "Port",
@@ -24,10 +24,12 @@ const FIELD_LABELS: [&str; 10] = [
     "Root CA cert (sslrootcert)",
     "Client cert (sslcert)",
     "Client key (sslkey)",
+    "Collect index stats",
 ];
 
 const PASSWORD_FIELD: usize = 5;
 const SSLMODE_FIELD: usize = 6;
+const COLLECT_FIELD: usize = 10;
 
 /// Build the connection details form pre-filled from `conn`.
 pub fn connection_form(conn: Connection) -> Form {
@@ -46,10 +48,12 @@ pub fn connection_form(conn: Connection) -> Form {
             conn.sslrootcert.unwrap_or_default(),
             conn.sslcert.unwrap_or_default(),
             conn.sslkey.unwrap_or_default(),
+            conn.collect_index_stats.to_string(),
         ],
     )
     .masked(PASSWORD_FIELD)
     .choice(SSLMODE_FIELD, modes)
+    .choice(COLLECT_FIELD, vec!["false".to_owned(), "true".to_owned()])
 }
 
 /// Build a `Connection` from the form values, without validating it.
@@ -75,6 +79,7 @@ pub fn connection_from_form(form: &Form) -> Result<Connection, String> {
         catalog: values[3].trim().to_string(),
         login: values[4].trim().to_string(),
         password: values[PASSWORD_FIELD].clone(),
+        collect_index_stats: values[COLLECT_FIELD] == "true",
         sslmode,
         sslrootcert: non_empty(&values[7]),
         sslcert: non_empty(&values[8]),

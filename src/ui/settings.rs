@@ -679,7 +679,7 @@ const SERVER_FIELDS: [&str; 7] = [
     "Client key (sslkey)",
 ];
 
-const LOGIN_FIELDS: [&str; 3] = ["Login", "Password", "Catalog name"];
+const LOGIN_FIELDS: [&str; 4] = ["Login", "Password", "Catalog name", "Collect index stats"];
 
 fn server_form(server: &ServerConfig) -> Form {
     Form::new(
@@ -728,9 +728,11 @@ fn login_form(login: &LoginConfig) -> Form {
             login.login.clone(),
             login.password.clone(),
             login.catalog.clone(),
+            login.collect_index_stats.to_string(),
         ],
     )
     .masked(1)
+    .choice(3, vec!["false".to_owned(), "true".to_owned()])
 }
 
 fn login_from_form(form: &Form) -> Result<LoginConfig, String> {
@@ -738,6 +740,7 @@ fn login_from_form(form: &Form) -> Result<LoginConfig, String> {
         login: form.values[0].trim().to_owned(),
         password: form.values[1].clone(),
         catalog: form.values[2].trim().to_owned(),
+        collect_index_stats: form.values[3] == "true",
     })
 }
 
