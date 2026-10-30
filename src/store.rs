@@ -12,7 +12,10 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 
+use chrono::{DateTime, SecondsFormat, Utc};
+
 use crate::config::{self, Connection};
+use crate::db::IndexStat;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
@@ -60,6 +63,38 @@ impl Store {
         MIGRATOR.run(&pool).await?;
         Ok(Self { pool })
     }
+
+    /// Appends one snapshot of index statistics, all rows stamped with the same time.
+    pub async fn record_index_stats(&self, stats: &[IndexStat]) -> Result<(), StoreError> {
+        let collected_at = format_ts(&Utc::now());
+        let mut tx = self.pool.begin().await?;
+        for s in stats {
+            sqlx::query(
+                "INSERT INTO index_stats (
+                     collected_at, relid, indexrelid, schemaname, relname, indexrelname,
+                     idx_scan, last_idx_scan, idx_tup_read, idx_tup_fetch
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            )
+            .bind(&collected_at)
+            .bind(i64::from(s.relid))
+            .bind(i64::from(s.indexrelid))
+            .bind(&s.schemaname)
+            .bind(&s.relname)
+            .bind(&s.indexrelname)
+            .bind(s.idx_scan)
+            .bind(s.last_idx_scan.as_ref().map(format_ts))
+            .bind(s.idx_tup_read)
+            .bind(s.idx_tup_fetch)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+}
+
+fn format_ts(ts: &DateTime<Utc>) -> String {
+    ts.to_rfc3339_opts(SecondsFormat::Micros, true)
 }
 
 #[cfg(test)]
@@ -72,6 +107,37 @@ mod tests {
         let path = dir.join("nested").join("srv.sqlite");
 
         let store = Store::open_at(&path).await.unwrap();
+        let stat = IndexStat {
+            relid: 25212,
+            indexrelid: 25228,
+            schemaname: "public".into(),
+            relname: "product".into(),
+            indexrelname: "product_pkey".into(),
+            idx_scan: 1,
+            last_idx_scan: Some(Utc::now()),
+            idx_tup_read: 100000,
+            idx_tup_fetch: 0,
+        };
+        let never_used = IndexStat {
+            indexrelid: 25248,
+            indexrelname: "customer_pkey".into(),
+            last_idx_scan: None,
+            idx_scan: 0,
+            idx_tup_read: 0,
+            ..stat.clone()
+        };
+        store
+            .record_index_stats(&[stat.clone(), never_used.clone()])
+            .await
+            .unwrap();
+        store.record_index_stats(&[stat]).await.unwrap();
+        let (rows, nulls, runs): (i64, i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(*) - count(last_idx_scan), count(DISTINCT collected_at) FROM index_stats",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!((rows, nulls, runs), (3, 1, 2));
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

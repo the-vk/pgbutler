@@ -8,8 +8,8 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 use tokio_postgres::Client;
 
-use crate::{agent, config};
-use crate::config::Connection;
+use crate::agent;
+use crate::config::{self, Connection};
 use crate::db::{self, QueryOutcome, RelKind};
 use crate::store::Store;
 use crate::ui::chat::{ChatAction, ChatScreen};
@@ -255,6 +255,14 @@ impl App {
             let result = async {
                 let client = db::connect(&conn).await.map_err(|e| e.to_string())?;
                 let store = Store::open(&conn).await.map_err(|e| e.to_string())?;
+                match db::index_stats(&client).await {
+                    Ok(stats) => {
+                        if let Err(error) = store.record_index_stats(&stats).await {
+                            log::warn!("Failed to store index statistics: {error}");
+                        }
+                    }
+                    Err(error) => log::warn!("Failed to read index statistics: {error}"),
+                }
                 Ok((client, store))
             }
             .await;

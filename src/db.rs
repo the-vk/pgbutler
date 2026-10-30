@@ -145,6 +145,51 @@ pub async fn connect(conn: &Connection) -> Result<Client, DbError> {
     Ok(client)
 }
 
+/// One row of `pg_stat_all_indexes`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexStat {
+    pub relid: u32,
+    pub indexrelid: u32,
+    pub schemaname: String,
+    pub relname: String,
+    pub indexrelname: String,
+    pub idx_scan: i64,
+    /// `None` if the index was never scanned or the server predates PostgreSQL 16.
+    pub last_idx_scan: Option<chrono::DateTime<chrono::Utc>>,
+    pub idx_tup_read: i64,
+    pub idx_tup_fetch: i64,
+}
+
+/// Read the current usage statistics of all indexes.
+pub async fn index_stats(client: &Client) -> Result<Vec<IndexStat>, DbError> {
+    let rows = client
+        .query("SELECT * FROM pg_stat_all_indexes", &[])
+        .await?;
+    rows.iter()
+        .map(|row| {
+            // `last_idx_scan` was added in PostgreSQL 16.
+            let has_last_scan = row.columns().iter().any(|c| c.name() == "last_idx_scan");
+            let last_idx_scan = if has_last_scan {
+                row.try_get::<_, Option<std::time::SystemTime>>("last_idx_scan")?
+                    .map(chrono::DateTime::from)
+            } else {
+                None
+            };
+            Ok(IndexStat {
+                relid: row.try_get("relid")?,
+                indexrelid: row.try_get("indexrelid")?,
+                schemaname: row.try_get("schemaname")?,
+                relname: row.try_get("relname")?,
+                indexrelname: row.try_get("indexrelname")?,
+                idx_scan: row.try_get("idx_scan")?,
+                last_idx_scan,
+                idx_tup_read: row.try_get("idx_tup_read")?,
+                idx_tup_fetch: row.try_get("idx_tup_fetch")?,
+            })
+        })
+        .collect()
+}
+
 /// Run one or more semicolon-separated statements via the simple query
 /// protocol and collect the results into a flat, display-friendly shape.
 pub async fn run_query(client: &Client, sql: &str) -> Result<QueryOutcome, DbError> {
