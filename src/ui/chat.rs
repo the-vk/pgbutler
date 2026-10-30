@@ -10,12 +10,10 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-use tokio_postgres::Client;
 
 use crate::agent::{AnalysisProgress, Response};
 use crate::config::{Config, Connection, ProviderConfig};
-use crate::db::{QueryOutcome, RelKind};
-use crate::store::Store;
+use crate::db::{DbConnection, QueryOutcome, RelKind};
 use crate::theme;
 use crate::ui::draw_banner;
 use crate::ui::settings::{SettingsEvent, SettingsScreen};
@@ -47,9 +45,7 @@ pub enum ChatAction {
 }
 
 pub struct ChatScreen {
-    pub conn: Connection,
-    pub client: Arc<Client>,
-    pub store: Store,
+    pub db: Arc<DbConnection>,
     pub config: Arc<Config>,
     pub messages: Vec<Message>,
     pub input: String,
@@ -66,7 +62,8 @@ pub struct ChatScreen {
 }
 
 impl ChatScreen {
-    pub fn new(conn: Connection, client: Client, store: Store, config: Arc<Config>) -> Self {
+    pub fn new(db: DbConnection, config: Arc<Config>) -> Self {
+        let conn = db.config();
         let mut messages = Vec::new();
         messages.push(Message {
             role: Role::System,
@@ -76,9 +73,7 @@ impl ChatScreen {
             ),
         });
         Self {
-            conn,
-            client: Arc::new(client),
-            store,
+            db: Arc::new(db),
             config,
             messages,
             input: String::new(),
@@ -520,7 +515,10 @@ impl ChatScreen {
     fn handle_whoami_command(&mut self, text: &str) -> Option<ChatAction> {
         let reply = format!(
             "{}@{}:{}/{} — verify-full mTLS",
-            self.conn.login, self.conn.host, self.conn.port, self.conn.catalog
+            self.db.config().login,
+            self.db.config().host,
+            self.db.config().port,
+            self.db.config().catalog
         );
         self.messages.push(Message {
             role: Role::User,
@@ -553,27 +551,21 @@ impl ChatScreen {
         }
     }
 
-    pub fn on_connect_result(
-        &mut self,
-        conn: Connection,
-        result: Result<(Client, Store), String>,
-    ) -> bool {
+    pub fn on_connect_result(&mut self, result: Result<Box<DbConnection>, String>) -> bool {
         self.busy = false;
         match result {
-            Ok((client, store)) => {
-                self.config.set_default_connection(&conn);
-                self.conn = conn;
-                self.client = Arc::new(client);
-                self.store = store;
+            Ok(db) => {
+                self.config.set_default_connection(db.config());
+                self.db = Arc::new(*db);
                 self.messages.push(Message {
                     role: Role::System,
                     content: format!(
                         "Connected to '{}' as {}@{}:{}/{}.",
-                        self.conn.name,
-                        self.conn.login,
-                        self.conn.host,
-                        self.conn.port,
-                        self.conn.catalog
+                        self.db.config().name,
+                        self.db.config().login,
+                        self.db.config().host,
+                        self.db.config().port,
+                        self.db.config().catalog
                     ),
                 });
                 if let Err(error) = self.config.write() {
@@ -693,7 +685,11 @@ impl ChatScreen {
             chunks[0],
             &format!(
                 "{} — {}@{} — provider: {} model: {} (Ctrl+m to switch)",
-                self.conn.name, self.conn.login, self.conn.host, provider_label, model_label
+                self.db.config().name,
+                self.db.config().login,
+                self.db.config().host,
+                provider_label,
+                model_label
             ),
         );
 

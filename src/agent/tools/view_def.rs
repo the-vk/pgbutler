@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
+use crate::db::DbConnection;
 use rig::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio_postgres::Client;
 
 use crate::agent::ToolError;
 
@@ -18,12 +18,12 @@ pub struct ViewDefArgs {
 /// Tool to get view definition.
 #[derive(Clone)]
 pub struct GetViewDefTool {
-    client: Arc<Client>,
+    db: Arc<DbConnection>,
 }
 
 impl GetViewDefTool {
-    pub fn new(client: Arc<Client>) -> Self {
-        Self { client }
+    pub fn new(db: Arc<DbConnection>) -> Self {
+        Self { db }
     }
 }
 
@@ -61,7 +61,7 @@ impl Tool for GetViewDefTool {
     ) -> Result<Self::Output, Self::Error> {
         log::info!(tool = "get_view_def"; "Running the tool 'get_view_def'");
         let schema = args.schema_name.as_deref().unwrap_or("public");
-        let output = crate::db::get_view_def(&self.client, schema, &args.rel_name).await?;
+        let output = self.db.get_view_def(schema, &args.rel_name).await?;
         log::debug!(tool = "get_view_def", view_def = output; "The view definition is ready");
         log::info!(tool = "get_view_def"; "The tool 'get_view_def' finished");
         Ok(output)

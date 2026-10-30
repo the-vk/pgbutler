@@ -16,7 +16,11 @@ use serde_json::Value;
 use strum::{AsRefStr, Display, EnumString};
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 
-use crate::config::Connection;
+use crate::config::{self, Connection};
+
+mod store;
+
+pub use store::{Store, StoreError};
 
 /// Tabular (or status) outcome of running a query via the simple query protocol.
 #[derive(Debug, Default, Clone)]
@@ -42,6 +46,240 @@ pub enum DbError {
     UnknownRelKind(String),
     #[error("Query returned no data")]
     NoData,
+    #[error(transparent)]
+    Store(#[from] StoreError),
+}
+
+/// A connection to a PostgreSQL server together with its local SQLite
+/// [`Store`] (`~/.pgbutler/connections/<name>.sqlite`) that tracks data about
+/// the server.
+#[derive(Debug)]
+pub struct DbConnection {
+    config: Connection,
+    client: Client,
+    store: Store,
+}
+
+impl DbConnection {
+    /// Connects to the server described by `config` and opens (migrating if
+    /// needed) its local store.
+    pub async fn connect(config: Connection) -> Result<Self, DbError> {
+        let client = connect_postgres(&config).await?;
+        let store = Store::open(&config::connection_store_file(&config.name)).await?;
+        Ok(Self {
+            config,
+            client,
+            store,
+        })
+    }
+
+    pub fn config(&self) -> &Connection {
+        &self.config
+    }
+
+    /// Reads current index usage statistics from the server and appends them
+    /// to the local store as a new snapshot.
+    pub async fn collect_index_stats(&self) -> Result<(), DbError> {
+        let stats = read_index_stats(&self.client).await?;
+        Ok(self.store.record_index_stats(&stats).await?)
+    }
+
+    /// Run one or more semicolon-separated statements via the simple query
+    /// protocol and collect the results into a flat, display-friendly shape.
+    pub async fn run_query(&self, sql: &str) -> Result<QueryOutcome, DbError> {
+        let messages = self.client.simple_query(sql).await?;
+        let mut outcome = QueryOutcome::default();
+
+        for message in messages {
+            match message {
+                SimpleQueryMessage::Row(row) => {
+                    if outcome.columns.is_empty() {
+                        outcome.columns =
+                            row.columns().iter().map(|c| c.name().to_string()).collect();
+                    }
+                    let values = (0..row.columns().len())
+                        .map(|i| row.get(i).unwrap_or("").to_string())
+                        .collect();
+                    outcome.rows.push(values);
+                }
+                SimpleQueryMessage::CommandComplete(n) => {
+                    outcome.statuses.push(format!("{n} row(s) affected"));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(outcome)
+    }
+
+    /// Run an `EXPLAIN` query with detailed settings against PostgreSQL and
+    /// return the formatted plan output as a multi-line string.
+    pub async fn explain(
+        &self,
+        sql: &str,
+        format: Option<ExplainFormat>,
+    ) -> Result<String, DbError> {
+        let explain_format = format.unwrap_or(ExplainFormat::Text);
+        let query = format!(
+            "explain (analyze true, verbose true, costs true, settings true, memory true, buffers true, wal true, serialize text, timing true, format {explain_format}) {sql}"
+        );
+        let messages = self.client.simple_query(&query).await?;
+        let mut lines = Vec::new();
+
+        for message in messages {
+            if let SimpleQueryMessage::Row(row) = message
+                && let Some(val) = row.get(0)
+            {
+                lines.push(val.to_string());
+            }
+        }
+
+        let output = lines.join("\n");
+
+        // Postgres pretty-prints JSON plans with generous whitespace; re-serialize
+        // compactly since this output is often fed to token-limited LLM contexts.
+        if explain_format == ExplainFormat::Json {
+            let value: Value = serde_json::from_str(&output)?;
+            return Ok(serde_json::to_string(&value)?);
+        }
+
+        Ok(output)
+    }
+
+    /// Collect query execution plan and table schema details for all tables referenced in the query.
+    #[allow(dead_code)]
+    pub async fn collect_query_analysis(&self, sql: &str) -> Result<QueryAnalysisData, DbError> {
+        let statements = self.explain_model(sql).await?;
+        let mut relations = Vec::new();
+        for stmt in &statements {
+            stmt.plan.collect_relations_into(&mut relations, "public");
+        }
+        relations.sort();
+        relations.dedup();
+
+        let mut table_schemas = HashMap::new();
+        for (schema, table) in relations {
+            let columns = self.get_table_schema(&schema, &table).await?;
+            let key = format!("{schema}.{table}");
+            table_schemas.insert(key, columns);
+        }
+
+        Ok(QueryAnalysisData {
+            statements,
+            table_schemas,
+        })
+    }
+
+    /// Run an `EXPLAIN` query with JSON format against PostgreSQL, parse the output,
+    /// and return the deserialized query plan model.
+    #[allow(dead_code)]
+    pub async fn explain_model(&self, sql: &str) -> Result<Vec<ExplainStatement>, DbError> {
+        let raw_json = self.explain(sql, Some(ExplainFormat::Json)).await?;
+        let model = serde_json::from_str(&raw_json)?;
+        Ok(model)
+    }
+
+    /// Query detailed schema information for columns of the given table.
+    #[allow(dead_code)]
+    pub async fn get_table_schema(
+        &self,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<Vec<TableColumn>, DbError> {
+        let rows = self
+            .client
+            .query(TABLE_SCHEMA_QUERY, &[&schema_name, &table_name])
+            .await?;
+
+        let columns = rows
+            .into_iter()
+            .map(|row| TableColumn {
+                catalog_name: row.get("catalog_name"),
+                schema_name: row.get("schema_name"),
+                table_name: row.get("table_name"),
+                ordinal_position: row.get("ordinal_position"),
+                column_name: row.get("column_name"),
+                data_type: row.get("data_type"),
+                type_details: row.get("type_details"),
+                is_nullable: row.get("is_nullable"),
+                column_default: row.get("column_default"),
+                is_identity: row.get("is_identity"),
+                identity_generation: row.get("identity_generation"),
+                collation_name: row.get("collation_name"),
+            })
+            .collect();
+
+        Ok(columns)
+    }
+
+    /// Discover indexes and their usage statistics for the given table.
+    pub async fn get_table_indexes(
+        &self,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<Vec<TableIndex>, DbError> {
+        let rows = self
+            .client
+            .query(TABLE_INDEXES_QUERY, &[&schema_name, &table_name])
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| TableIndex {
+                index_name: row.get("index_name"),
+                access_method: row.get("access_method"),
+                is_unique: row.get("is_unique"),
+                is_primary: row.get("is_primary"),
+                is_valid: row.get("is_valid"),
+                is_ready: row.get("is_ready"),
+                definition: row.get("definition"),
+                size_bytes: row.get("size_bytes"),
+                scans: row.get("scans"),
+                tuples_read: row.get("tuples_read"),
+                tuples_fetched: row.get("tuples_fetched"),
+            })
+            .collect())
+    }
+
+    pub async fn get_relation_kind(
+        &self,
+        schema_name: &str,
+        relation_name: &str,
+    ) -> Result<RelKind, DbError> {
+        let rows = self
+            .client
+            .query(REL_KIND_QUERY, &[&schema_name, &relation_name])
+            .await?;
+
+        let rel_kind = rows
+            .first()
+            .map(|v| {
+                let ch: i8 = v.get("relkind");
+                let s = (ch as u8 as char).to_string();
+                (s.clone(), RelKind::from_str(&s))
+            })
+            .map(|v| v.1.map_err(|_| DbError::UnknownRelKind(v.0)));
+
+        rel_kind.unwrap_or(Err(DbError::NoData))
+    }
+
+    pub async fn get_view_def(
+        &self,
+        schema_name: &str,
+        relation_name: &str,
+    ) -> Result<String, DbError> {
+        let rows = self
+            .client
+            .query(
+                GET_VIEW_DEF_QUERY,
+                &[&format!("{schema_name}.{relation_name}")],
+            )
+            .await?;
+
+        rows.first()
+            .map(|v| Ok(v.get("view_def")))
+            .unwrap_or(Err(DbError::NoData))
+    }
 }
 
 #[derive(AsRefStr, Debug, Clone, Copy, Display, PartialEq, Eq)]
@@ -81,7 +319,7 @@ pub enum RelKind {
 ///
 /// Returns the live client; the background connection task is spawned onto
 /// the current tokio runtime and its errors are dropped after logging.
-pub async fn connect(conn: &Connection) -> Result<Client, DbError> {
+async fn connect_postgres(conn: &Connection) -> Result<Client, DbError> {
     conn.validate().map_err(DbError::Config)?;
 
     let mut pg_config = tokio_postgres::Config::new();
@@ -161,7 +399,7 @@ pub struct IndexStat {
 }
 
 /// Read the current usage statistics of all indexes.
-pub async fn index_stats(client: &Client) -> Result<Vec<IndexStat>, DbError> {
+async fn read_index_stats(client: &Client) -> Result<Vec<IndexStat>, DbError> {
     let rows = client
         .query("SELECT * FROM pg_stat_all_indexes", &[])
         .await?;
@@ -188,67 +426,6 @@ pub async fn index_stats(client: &Client) -> Result<Vec<IndexStat>, DbError> {
             })
         })
         .collect()
-}
-
-/// Run one or more semicolon-separated statements via the simple query
-/// protocol and collect the results into a flat, display-friendly shape.
-pub async fn run_query(client: &Client, sql: &str) -> Result<QueryOutcome, DbError> {
-    let messages = client.simple_query(sql).await?;
-    let mut outcome = QueryOutcome::default();
-
-    for message in messages {
-        match message {
-            SimpleQueryMessage::Row(row) => {
-                if outcome.columns.is_empty() {
-                    outcome.columns = row.columns().iter().map(|c| c.name().to_string()).collect();
-                }
-                let values = (0..row.columns().len())
-                    .map(|i| row.get(i).unwrap_or("").to_string())
-                    .collect();
-                outcome.rows.push(values);
-            }
-            SimpleQueryMessage::CommandComplete(n) => {
-                outcome.statuses.push(format!("{n} row(s) affected"));
-            }
-            _ => {}
-        }
-    }
-
-    Ok(outcome)
-}
-
-/// Run an `EXPLAIN` query with detailed settings against PostgreSQL and
-/// return the formatted plan output as a multi-line string.
-pub async fn explain(
-    client: &Client,
-    sql: &str,
-    format: Option<ExplainFormat>,
-) -> Result<String, DbError> {
-    let explain_format = format.unwrap_or(ExplainFormat::Text);
-    let query = format!(
-        "explain (analyze true, verbose true, costs true, settings true, memory true, buffers true, wal true, serialize text, timing true, format {explain_format}) {sql}"
-    );
-    let messages = client.simple_query(&query).await?;
-    let mut lines = Vec::new();
-
-    for message in messages {
-        if let SimpleQueryMessage::Row(row) = message
-            && let Some(val) = row.get(0)
-        {
-            lines.push(val.to_string());
-        }
-    }
-
-    let output = lines.join("\n");
-
-    // Postgres pretty-prints JSON plans with generous whitespace; re-serialize
-    // compactly since this output is often fed to token-limited LLM contexts.
-    if explain_format == ExplainFormat::Json {
-        let value: Value = serde_json::from_str(&output)?;
-        return Ok(serde_json::to_string(&value)?);
-    }
-
-    Ok(output)
 }
 
 /// A top-level EXPLAIN result representing a statement's execution plan and metadata.
@@ -360,42 +537,6 @@ pub struct QueryAnalysisData {
     pub table_schemas: HashMap<String, Vec<TableColumn>>,
 }
 
-/// Collect query execution plan and table schema details for all tables referenced in the query.
-#[allow(dead_code)]
-pub async fn collect_query_analysis(
-    client: &Client,
-    sql: &str,
-) -> Result<QueryAnalysisData, DbError> {
-    let statements = explain_model(client, sql).await?;
-    let mut relations = Vec::new();
-    for stmt in &statements {
-        stmt.plan.collect_relations_into(&mut relations, "public");
-    }
-    relations.sort();
-    relations.dedup();
-
-    let mut table_schemas = HashMap::new();
-    for (schema, table) in relations {
-        let columns = get_table_schema(client, &schema, &table).await?;
-        let key = format!("{schema}.{table}");
-        table_schemas.insert(key, columns);
-    }
-
-    Ok(QueryAnalysisData {
-        statements,
-        table_schemas,
-    })
-}
-
-/// Run an `EXPLAIN` query with JSON format against PostgreSQL, parse the output,
-/// and return the deserialized query plan model.
-#[allow(dead_code)]
-pub async fn explain_model(client: &Client, sql: &str) -> Result<Vec<ExplainStatement>, DbError> {
-    let raw_json = explain(client, sql, Some(ExplainFormat::Json)).await?;
-    let model = serde_json::from_str(&raw_json)?;
-    Ok(model)
-}
-
 /// Detailed schema information for a single column in a PostgreSQL table.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -449,38 +590,6 @@ WHERE t.table_type = 'BASE TABLE'
 ORDER BY t.table_schema, t.table_name, c.ordinal_position;
 "#;
 
-/// Query detailed schema information for columns of the given table.
-#[allow(dead_code)]
-pub async fn get_table_schema(
-    client: &Client,
-    schema_name: &str,
-    table_name: &str,
-) -> Result<Vec<TableColumn>, DbError> {
-    let rows = client
-        .query(TABLE_SCHEMA_QUERY, &[&schema_name, &table_name])
-        .await?;
-
-    let columns = rows
-        .into_iter()
-        .map(|row| TableColumn {
-            catalog_name: row.get("catalog_name"),
-            schema_name: row.get("schema_name"),
-            table_name: row.get("table_name"),
-            ordinal_position: row.get("ordinal_position"),
-            column_name: row.get("column_name"),
-            data_type: row.get("data_type"),
-            type_details: row.get("type_details"),
-            is_nullable: row.get("is_nullable"),
-            column_default: row.get("column_default"),
-            is_identity: row.get("is_identity"),
-            identity_generation: row.get("identity_generation"),
-            collation_name: row.get("collation_name"),
-        })
-        .collect();
-
-    Ok(columns)
-}
-
 /// Index metadata and usage statistics for a PostgreSQL table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableIndex {
@@ -526,34 +635,6 @@ WHERE table_namespace.nspname = $1
 ORDER BY index_class.relname;
 "#;
 
-/// Discover indexes and their usage statistics for the given table.
-pub async fn get_table_indexes(
-    client: &Client,
-    schema_name: &str,
-    table_name: &str,
-) -> Result<Vec<TableIndex>, DbError> {
-    let rows = client
-        .query(TABLE_INDEXES_QUERY, &[&schema_name, &table_name])
-        .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| TableIndex {
-            index_name: row.get("index_name"),
-            access_method: row.get("access_method"),
-            is_unique: row.get("is_unique"),
-            is_primary: row.get("is_primary"),
-            is_valid: row.get("is_valid"),
-            is_ready: row.get("is_ready"),
-            definition: row.get("definition"),
-            size_bytes: row.get("size_bytes"),
-            scans: row.get("scans"),
-            tuples_read: row.get("tuples_read"),
-            tuples_fetched: row.get("tuples_fetched"),
-        })
-        .collect())
-}
-
 const REL_KIND_QUERY: &str = r#"
 SELECT n.nspname, c.relname, relkind
 FROM pg_catalog.pg_class c
@@ -561,45 +642,7 @@ JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = $1 AND c.relname = $2;
 "#;
 
-pub async fn get_relation_kind(
-    client: &Client,
-    schema_name: &str,
-    relation_name: &str,
-) -> Result<RelKind, DbError> {
-    let rows = client
-        .query(REL_KIND_QUERY, &[&schema_name, &relation_name])
-        .await?;
-
-    let rel_kind = rows
-        .first()
-        .map(|v| {
-            let ch: i8 = v.get("relkind");
-            let s = (ch as u8 as char).to_string();
-            (s.clone(), RelKind::from_str(&s))
-        })
-        .map(|v| v.1.map_err(|_| DbError::UnknownRelKind(v.0)));
-
-    rel_kind.unwrap_or(Err(DbError::NoData))
-}
-
 const GET_VIEW_DEF_QUERY: &str = "SELECT pg_get_viewdef($1) as view_def;";
-
-pub async fn get_view_def(
-    client: &Client,
-    schema_name: &str,
-    relation_name: &str,
-) -> Result<String, DbError> {
-    let rows = client
-        .query(
-            GET_VIEW_DEF_QUERY,
-            &[&format!("{schema_name}.{relation_name}")],
-        )
-        .await?;
-
-    rows.first()
-        .map(|v| Ok(v.get("view_def")))
-        .unwrap_or(Err(DbError::NoData))
-}
 
 #[cfg(test)]
 mod tests {

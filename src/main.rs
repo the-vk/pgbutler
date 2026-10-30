@@ -3,7 +3,6 @@ mod app;
 mod config;
 mod crypto;
 mod db;
-mod store;
 mod theme;
 mod ui;
 

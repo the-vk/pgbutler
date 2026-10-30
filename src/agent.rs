@@ -7,10 +7,10 @@ mod tools;
 
 use std::sync::Arc;
 
+use crate::db::DbConnection;
 use futures::StreamExt;
 use rig::agent::{AgentHook, HookContext, OutcomeAction, OutcomeEvent};
 use rig::streaming::{Item, StreamEvent};
-use tokio_postgres::Client;
 
 pub use crate::agent::provider::{AgentProvider, build};
 use crate::agent::tools::{
@@ -115,17 +115,17 @@ pub async fn is_provider_ready(config: &ProviderConfig) -> bool {
 
 /// Build a configured query analyzer agent on top of any provider.
 pub fn build_analyzer_agent(
-    client: Arc<Client>,
+    db: Arc<DbConnection>,
     provider: &dyn AgentProvider,
     model_name: Option<&str>,
 ) -> Result<rig::agent::Agent, AgentError> {
     let model = model_name.unwrap_or_else(|| provider.default_model());
 
-    let plan_tool = GetQueryPlanTool::new(Arc::clone(&client));
-    let schema_tool = GetTableSchemaTool::new(Arc::clone(&client));
-    let indexes_tool = GetTableIndexesTool::new(Arc::clone(&client));
-    let get_rel_kind_tool = GetRelKindTool::new(Arc::clone(&client));
-    let get_view_def_tool = GetViewDefTool::new(Arc::clone(&client));
+    let plan_tool = GetQueryPlanTool::new(Arc::clone(&db));
+    let schema_tool = GetTableSchemaTool::new(Arc::clone(&db));
+    let indexes_tool = GetTableIndexesTool::new(Arc::clone(&db));
+    let get_rel_kind_tool = GetRelKindTool::new(Arc::clone(&db));
+    let get_view_def_tool = GetViewDefTool::new(Arc::clone(&db));
 
     let agent = provider
         .agent_builder(model)?
@@ -146,16 +146,18 @@ pub fn build_analyzer_agent(
 
 /// Analyze a SQL query using the Rig agent with query plan and schema inspection tools.
 pub async fn analyze_query_streaming(
-    client: Arc<Client>,
+    db: Arc<DbConnection>,
     sql: &str,
     provider: &dyn AgentProvider,
     model_name: Option<&str>,
     mut on_progress: impl FnMut(AnalysisProgress) + Send,
 ) -> Result<Response, AgentError> {
     // Collect the initial execution plan to seed into the user prompt
-    let plan_json = crate::db::explain(&client, sql, Some(crate::db::ExplainFormat::Json)).await?;
+    let plan_json = db
+        .explain(sql, Some(crate::db::ExplainFormat::Json))
+        .await?;
 
-    let agent = build_analyzer_agent(client, provider, model_name)?;
+    let agent = build_analyzer_agent(db, provider, model_name)?;
 
     let prompt = format!(
         "Please analyze the following SQL query and its execution plan:\n\n\

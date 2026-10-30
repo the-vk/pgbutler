@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
+use crate::db::DbConnection;
 use rig::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio_postgres::Client;
 
 use crate::agent::ToolError;
 
@@ -18,12 +18,12 @@ pub struct TableIndexesArgs {
 /// Tool to discover indexes and their usage statistics for a PostgreSQL table.
 #[derive(Clone)]
 pub struct GetTableIndexesTool {
-    client: Arc<Client>,
+    db: Arc<DbConnection>,
 }
 
 impl GetTableIndexesTool {
-    pub fn new(client: Arc<Client>) -> Self {
-        Self { client }
+    pub fn new(db: Arc<DbConnection>) -> Self {
+        Self { db }
     }
 }
 
@@ -61,7 +61,7 @@ impl Tool for GetTableIndexesTool {
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
         let schema = args.schema_name.as_deref().unwrap_or("public");
-        let indexes = crate::db::get_table_indexes(&self.client, schema, &args.table_name).await?;
+        let indexes = self.db.get_table_indexes(schema, &args.table_name).await?;
         let output = serde_json::to_string(&indexes)?;
         log::debug!(table_indexes = output; "Table indexes are ready");
         Ok(output)

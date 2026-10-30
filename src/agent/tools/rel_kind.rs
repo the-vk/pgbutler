@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
+use crate::db::DbConnection;
 use rig::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio_postgres::Client;
 
 use crate::agent::ToolError;
 
@@ -18,12 +18,12 @@ pub struct RelKindArgs {
 /// Tool to get a relation kind.
 #[derive(Clone)]
 pub struct GetRelKindTool {
-    client: Arc<Client>,
+    db: Arc<DbConnection>,
 }
 
 impl GetRelKindTool {
-    pub fn new(client: Arc<Client>) -> Self {
-        Self { client }
+    pub fn new(db: Arc<DbConnection>) -> Self {
+        Self { db }
     }
 }
 
@@ -61,7 +61,7 @@ impl Tool for GetRelKindTool {
     ) -> Result<Self::Output, Self::Error> {
         log::info!(tool = "get_rel_kind", schema_name = args.schema_name, rel_name = args.rel_name; "Running the tool 'get_rel_kind'");
         let schema = args.schema_name.as_deref().unwrap_or("public");
-        let rel_kind = crate::db::get_relation_kind(&self.client, schema, &args.rel_name).await?;
+        let rel_kind = self.db.get_relation_kind(schema, &args.rel_name).await?;
         let output = rel_kind.to_string();
         log::debug!(tool = "get_rel_kind", rel_kind = output; "Relation kind is ready");
         log::info!(tool = "get_rel_kind"; "The tool 'get_rel_kind' finished");

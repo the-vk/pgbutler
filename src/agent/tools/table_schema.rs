@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
+use crate::db::DbConnection;
 use rig::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio_postgres::Client;
 
 use crate::agent::ToolError;
 
@@ -17,12 +17,12 @@ pub struct TableSchemaArgs {
 /// Tool to get column definitions and schema information for a database table.
 #[derive(Clone)]
 pub struct GetTableSchemaTool {
-    client: Arc<Client>,
+    db: Arc<DbConnection>,
 }
 
 impl GetTableSchemaTool {
-    pub fn new(client: Arc<Client>) -> Self {
-        Self { client }
+    pub fn new(db: Arc<DbConnection>) -> Self {
+        Self { db }
     }
 }
 
@@ -60,7 +60,7 @@ impl Tool for GetTableSchemaTool {
     ) -> Result<Self::Output, Self::Error> {
         log::info!(tool = "get_table_schema", schema = args.schema_name, table = args.table_name; "Running the tool 'get_table_schema'");
         let schema = args.schema_name.as_deref().unwrap_or("public");
-        let columns = crate::db::get_table_schema(&self.client, schema, &args.table_name).await?;
+        let columns = self.db.get_table_schema(schema, &args.table_name).await?;
         // Compact JSON (vs. pretty-printed) to conserve tokens in the model context.
         let output = serde_json::to_string(&columns)?;
         log::debug!(table_schema = output; "Table schema is ready");

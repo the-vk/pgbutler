@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
+use crate::db::DbConnection;
 use rig::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio_postgres::Client;
 
 use crate::agent::ToolError;
 
@@ -16,12 +16,12 @@ pub struct QueryPlanArgs {
 /// Tool to get the structured execution plan (EXPLAIN JSON) for a PostgreSQL query.
 #[derive(Clone)]
 pub struct GetQueryPlanTool {
-    client: Arc<Client>,
+    db: Arc<DbConnection>,
 }
 
 impl GetQueryPlanTool {
-    pub fn new(client: Arc<Client>) -> Self {
-        Self { client }
+    pub fn new(db: Arc<DbConnection>) -> Self {
+        Self { db }
     }
 }
 
@@ -55,12 +55,10 @@ impl Tool for GetQueryPlanTool {
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
         log::info!(sql = args.query; "Running the tool 'get_query_plan'");
-        let plan_json = crate::db::explain(
-            &self.client,
-            &args.query,
-            Some(crate::db::ExplainFormat::Json),
-        )
-        .await?;
+        let plan_json = self
+            .db
+            .explain(&args.query, Some(crate::db::ExplainFormat::Json))
+            .await?;
 
         log::debug!(execution_plan = plan_json; "Execution plan is ready.");
         log::info!("The tool 'get_query_plan' finished.");

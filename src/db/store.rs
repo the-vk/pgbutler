@@ -1,4 +1,4 @@
-//! Per-connection local SQLite store: `~/.pgbutler/connections/<name>.sqlite`.
+//! Local SQLite store holding data tracked about a server connection.
 //!
 //! Migrations in `migrations/` are embedded into the binary and applied every
 //! time a store is opened, i.e. when a connection to a server is established.
@@ -6,16 +6,14 @@
 
 use std::path::Path;
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::{
     SqlitePool,
     migrate::Migrator,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 
-use chrono::{DateTime, SecondsFormat, Utc};
-
-use crate::config::{self, Connection};
-use crate::db::IndexStat;
+use super::IndexStat;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
@@ -35,12 +33,8 @@ pub struct Store {
 }
 
 impl Store {
-    /// Opens (creating if needed) the store of `conn` and applies pending migrations.
-    pub async fn open(conn: &Connection) -> Result<Self, StoreError> {
-        Self::open_at(&config::connection_store_file(&conn.name)).await
-    }
-
-    pub async fn open_at(path: &Path) -> Result<Self, StoreError> {
+    /// Opens (creating if needed) the store file at `path` and applies pending migrations.
+    pub async fn open(path: &Path) -> Result<Self, StoreError> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -102,11 +96,11 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_migrations() {
+    async fn index_stats_snapshots_are_appended() {
         let dir = std::env::temp_dir().join(format!("pgbutler-store-{}", std::process::id()));
         let path = dir.join("nested").join("srv.sqlite");
 
-        let store = Store::open_at(&path).await.unwrap();
+        let store = Store::open(&path).await.unwrap();
         let stat = IndexStat {
             relid: 25212,
             indexrelid: 25228,

@@ -6,12 +6,10 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyM
 use futures::{FutureExt, StreamExt};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
-use tokio_postgres::Client;
 
 use crate::agent;
 use crate::config::{self, Connection};
-use crate::db::{self, QueryOutcome, RelKind};
-use crate::store::Store;
+use crate::db::{DbConnection, QueryOutcome, RelKind};
 use crate::ui::chat::{ChatAction, ChatScreen};
 use crate::ui::setup::SetupScreen;
 
@@ -32,10 +30,7 @@ pub enum AppError {
 }
 
 pub enum AppEvent {
-    ConnectResult {
-        conn: Box<Connection>,
-        result: Result<(Client, Store), String>,
-    },
+    ConnectResult(Result<Box<DbConnection>, String>),
     QueryResult(Result<QueryOutcome, String>),
     ExplainResult(Result<String, String>),
     AnalyzeProgress(agent::AnalysisProgress),
@@ -177,31 +172,27 @@ impl App {
 
     fn handle_app_event(&mut self, event: AppEvent) {
         match event {
-            AppEvent::ConnectResult { conn, result } => match &mut self.screen {
+            AppEvent::ConnectResult(result) => match &mut self.screen {
                 Screen::Setup(setup) => {
                     setup.connecting = false;
                     match result {
-                        Ok((client, store)) => {
-                            if let Err(error) = self.config.save_connection(&conn) {
+                        Ok(db) => {
+                            if let Err(error) = self.config.save_connection(db.config()) {
                                 log::warn!("Failed to save connection profile: {error}");
                             }
-                            self.config.set_default_connection(&conn);
+                            self.config.set_default_connection(db.config());
                             if let Err(error) = self.config.write() {
                                 log::warn!("Failed to save default connection: {error}");
                             }
-                            self.screen = Screen::Chat(ChatScreen::new(
-                                *conn,
-                                client,
-                                store,
-                                Arc::clone(&self.config),
-                            ));
+                            self.screen =
+                                Screen::Chat(ChatScreen::new(*db, Arc::clone(&self.config)));
                             self.spawn_fetch_models();
                         }
                         Err(err) => setup.error = Some(err),
                     }
                 }
                 Screen::Chat(chat) => {
-                    if chat.on_connect_result(*conn, result) {
+                    if chat.on_connect_result(result) {
                         self.spawn_fetch_models();
                     }
                 }
@@ -253,34 +244,25 @@ impl App {
         let tx = self.events_tx.clone();
         tokio::spawn(async move {
             let result = async {
-                let client = db::connect(&conn).await.map_err(|e| e.to_string())?;
-                let store = Store::open(&conn).await.map_err(|e| e.to_string())?;
-                match db::index_stats(&client).await {
-                    Ok(stats) => {
-                        if let Err(error) = store.record_index_stats(&stats).await {
-                            log::warn!("Failed to store index statistics: {error}");
-                        }
-                    }
-                    Err(error) => log::warn!("Failed to read index statistics: {error}"),
+                let db = DbConnection::connect(conn)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if let Err(error) = db.collect_index_stats().await {
+                    log::warn!("Failed to collect index statistics: {error}");
                 }
-                Ok((client, store))
+                Ok(Box::new(db))
             }
             .await;
-            let _ = tx.send(AppEvent::ConnectResult {
-                conn: Box::new(conn),
-                result,
-            });
+            let _ = tx.send(AppEvent::ConnectResult(result));
         });
     }
 
     fn spawn_query(&self, sql: String) {
         let tx = self.events_tx.clone();
         if let Screen::Chat(chat) = &self.screen {
-            let client = Arc::clone(&chat.client);
+            let db = Arc::clone(&chat.db);
             tokio::spawn(async move {
-                let result = db::run_query(&client, &sql)
-                    .await
-                    .map_err(|e| e.to_string());
+                let result = db.run_query(&sql).await.map_err(|e| e.to_string());
                 let _ = tx.send(AppEvent::QueryResult(result));
             });
         }
@@ -289,11 +271,9 @@ impl App {
     fn spawn_explain(&self, sql: String) {
         let tx = self.events_tx.clone();
         if let Screen::Chat(chat) = &self.screen {
-            let client = Arc::clone(&chat.client);
+            let db = Arc::clone(&chat.db);
             tokio::spawn(async move {
-                let result = db::explain(&client, &sql, None)
-                    .await
-                    .map_err(|e| e.to_string());
+                let result = db.explain(&sql, None).await.map_err(|e| e.to_string());
                 let _ = tx.send(AppEvent::ExplainResult(result));
             });
         }
@@ -303,7 +283,7 @@ impl App {
         let tx = self.events_tx.clone();
         let config = Arc::clone(&self.config);
         if let Screen::Chat(chat) = &self.screen {
-            let client = Arc::clone(&chat.client);
+            let db = Arc::clone(&chat.db);
             let model = chat.current_model();
             tokio::spawn(async move {
                 let progress_tx = tx.clone();
@@ -315,7 +295,7 @@ impl App {
                     let model = model.as_deref();
                     log::info!(model = model.unwrap_or_else(|| provider.default_model()); "Selected model");
                     agent::analyze_query_streaming(
-                        client,
+                        db,
                         &sql,
                         provider.as_ref(),
                         model,
@@ -335,9 +315,10 @@ impl App {
     fn spawn_relkind(&self, schema: String, relation: String) {
         let tx = self.events_tx.clone();
         if let Screen::Chat(chat) = &self.screen {
-            let client = Arc::clone(&chat.client);
+            let db = Arc::clone(&chat.db);
             tokio::spawn(async move {
-                let result = db::get_relation_kind(&client, &schema, &relation)
+                let result = db
+                    .get_relation_kind(&schema, &relation)
                     .await
                     .map_err(|e| e.to_string());
                 let _ = tx.send(AppEvent::RelKindResult(result));
