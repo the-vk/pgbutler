@@ -8,7 +8,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-use eyre::Result;
 use serde::{Deserialize, Serialize};
 
 mod keyring;
@@ -219,8 +218,18 @@ pub struct Config {
     servers: RwLock<Vec<ServerConfig>>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Failed to parse config: {0}")]
+    Parse(#[from] toml::de::Error),
+    #[error("Failed to serialize config: {0}")]
+    Serialize(#[from] toml::ser::Error),
+}
+
 impl Config {
-    pub fn read() -> Result<Config> {
+    pub fn read() -> Result<Config, ConfigError> {
         let config_file = config_file();
         let mut config = if config_file.exists() {
             read_config_file(&config_file)?
@@ -231,7 +240,7 @@ impl Config {
         Ok(config.with_defaults())
     }
 
-    pub fn write(&self) -> Result<()> {
+    pub fn write(&self) -> Result<(), ConfigError> {
         let config_content = toml::to_string(&self)?;
         let config_file = config_file();
         fs::create_dir_all(app_dir())?;
@@ -523,7 +532,7 @@ impl Config {
     }
 }
 
-fn read_config_file(path: &Path) -> Result<Config> {
+fn read_config_file(path: &Path) -> Result<Config, ConfigError> {
     let config_content = fs::read_to_string(path)?;
     Ok(toml::from_str(&config_content)?)
 }

@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use eyre::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::{FutureExt, StreamExt};
 use ratatui::DefaultTerminal;
@@ -23,6 +22,14 @@ pub enum Screen {
 
 /// Events produced by background async work and fed back into the main loop.
 #[allow(clippy::enum_variant_names)]
+#[derive(Debug, thiserror::Error)]
+pub enum AppError {
+    #[error("Terminal error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Config(#[from] crate::config::ConfigError),
+}
+
 pub enum AppEvent {
     ConnectResult {
         conn: Box<Connection>,
@@ -80,7 +87,7 @@ impl App {
         }
     }
 
-    pub async fn run(&mut self, mut terminal: DefaultTerminal) -> Result<()> {
+    pub async fn run(&mut self, mut terminal: DefaultTerminal) -> Result<(), AppError> {
         let mut reader = EventStream::new();
 
         // Kick off an immediate connect attempt if a saved connection should

@@ -6,7 +6,7 @@ mod db;
 mod theme;
 mod ui;
 
-use app::App;
+use app::{App, AppError};
 use chrono::Local;
 use logforth::{
     append::file::FileBuilder,
@@ -14,6 +14,7 @@ use logforth::{
     record::{Level, LevelFilter},
 };
 use std::io::stdout;
+use std::process::ExitCode;
 use std::sync::Arc;
 
 #[cfg(unix)]
@@ -108,7 +109,18 @@ impl KeyboardEnhancementGuard {
 }
 
 #[tokio::main]
-async fn main() -> eyre::Result<()> {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            log::error!("{error}");
+            eprintln!("Error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<(), AppError> {
     let now = Local::now();
     let log_name = format!("{}", now.format("%Y-%m-%dT%H-%M-%S"));
     let log_file = FileBuilder::new(crate::config::log_dir(), log_name)

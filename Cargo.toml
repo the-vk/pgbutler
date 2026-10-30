@@ -16,7 +16,6 @@ edition = "2024"
 [dependencies]
 aes-gcm = "0.11.1"
 chrono = "0.4.45"
-eyre = "0.6.12"
 crossterm = { version = "0.29.0", features = ["event-stream", "bracketed-paste"] }
 dirs = "7.0.0"
 futures = "0.3.34"
