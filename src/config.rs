@@ -7,6 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -143,12 +144,18 @@ impl OllamaConfig {
 #[serde(default)]
 pub struct AppSection {
     pub provider: String,
+    /// Minimum age, in minutes, of the latest index statistics sample before a new one is taken.
+    pub index_stats_interval_minutes: u64,
+    /// Delay, in minutes, before retrying a failed index statistics collection.
+    pub index_stats_retry_minutes: u64,
 }
 
 impl Default for AppSection {
     fn default() -> Self {
         Self {
             provider: "ollama".to_owned(),
+            index_stats_interval_minutes: 60,
+            index_stats_retry_minutes: 5,
         }
     }
 }
@@ -216,6 +223,12 @@ pub struct Config {
     default_connection: RwLock<Option<String>>,
     #[serde(skip)]
     servers: RwLock<Vec<ServerConfig>>,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config").finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -336,6 +349,42 @@ impl Config {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .provider
             .clone()
+    }
+
+    /// Minimum age of the latest index statistics sample before a new one is taken.
+    pub fn index_stats_interval(&self) -> Duration {
+        self.minutes(|app| app.index_stats_interval_minutes)
+    }
+
+    /// Delay before retrying a failed index statistics collection.
+    pub fn index_stats_retry(&self) -> Duration {
+        self.minutes(|app| app.index_stats_retry_minutes)
+    }
+
+    fn minutes(&self, field: impl FnOnce(&AppSection) -> u64) -> Duration {
+        let app = self
+            .app
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Duration::from_secs(field(&app).max(1) * 60)
+    }
+
+    /// Both values are in minutes and must be at least 1.
+    pub fn set_index_stats_schedule(
+        &self,
+        interval_minutes: u64,
+        retry_minutes: u64,
+    ) -> Result<(), String> {
+        if interval_minutes == 0 || retry_minutes == 0 {
+            return Err("intervals must be at least 1 minute".to_owned());
+        }
+        let mut app = self
+            .app
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        app.index_stats_interval_minutes = interval_minutes;
+        app.index_stats_retry_minutes = retry_minutes;
+        Ok(())
     }
 
     pub fn default_connection(&self) -> Option<String> {

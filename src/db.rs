@@ -23,16 +23,11 @@ use strum::{AsRefStr, Display, EnumString};
 use tokio::task::JoinHandle;
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 
-use crate::config::{self, Connection};
+use crate::config::{self, Config, Connection};
 
 mod store;
 
 pub use store::{Store, StoreError};
-
-/// Minimum age of the latest index statistics sample before a new one is taken.
-const INDEX_STATS_INTERVAL: Duration = Duration::from_secs(60 * 60);
-/// Delay before retrying after a failed collection attempt.
-const INDEX_STATS_RETRY: Duration = Duration::from_secs(5 * 60);
 
 /// Tabular (or status) outcome of running a query via the simple query protocol.
 #[derive(Debug, Default, Clone)]
@@ -70,6 +65,8 @@ pub struct DbConnection {
     config: Connection,
     client: Client,
     store: Store,
+    /// Application settings; the sampling intervals are read on every cycle.
+    settings: Arc<Config>,
     /// Background index statistics sampler; aborted when the connection is dropped.
     index_stats_task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -85,13 +82,14 @@ impl Drop for DbConnection {
 impl DbConnection {
     /// Connects to the server described by `config` and opens (migrating if
     /// needed) its local store.
-    pub async fn connect(config: Connection) -> Result<Self, DbError> {
+    pub async fn connect(config: Connection, settings: Arc<Config>) -> Result<Self, DbError> {
         let client = connect_postgres(&config).await?;
         let store = Store::open(&config::connection_store_file(&config.name)).await?;
         Ok(Self {
             config,
             client,
             store,
+            settings,
             index_stats_task: Mutex::new(None),
         })
     }
@@ -102,7 +100,7 @@ impl DbConnection {
 
     /// Starts a background task that samples index usage statistics into the
     /// local store whenever the latest sample is older than
-    /// [`INDEX_STATS_INTERVAL`]. The task is stored in the connection and
+    /// the configured index statistics interval. The task is stored in the connection and
     /// aborted when the connection is dropped; calling this again replaces it.
     pub fn spawn_index_stats_collector(self: &Arc<Self>) {
         let db = Arc::downgrade(self);
@@ -113,7 +111,7 @@ impl DbConnection {
                     Ok(wait) => wait,
                     Err(error) => {
                         log::warn!("Failed to collect index statistics: {error}");
-                        INDEX_STATS_RETRY
+                        conn.settings.index_stats_retry()
                     }
                 };
                 // Don't keep the connection alive while sleeping.
@@ -134,17 +132,18 @@ impl DbConnection {
     /// Takes a new index statistics sample if the latest one is missing or too
     /// old. Returns how long to wait until the next sample is due.
     async fn collect_index_stats_if_due(&self) -> Result<Duration, DbError> {
-        let interval = chrono::Duration::from_std(INDEX_STATS_INTERVAL).expect("interval fits");
+        let interval_std = self.settings.index_stats_interval();
+        let interval = chrono::Duration::from_std(interval_std).expect("interval fits");
         if let Some(last) = self.store.last_index_stats_at().await? {
             let due_in = interval - (Utc::now() - last);
             if due_in > chrono::Duration::zero() {
-                return Ok(due_in.to_std().unwrap_or(INDEX_STATS_RETRY));
+                return Ok(due_in.to_std().unwrap_or(self.settings.index_stats_retry()));
             }
         }
         let stats = read_index_stats(&self.client).await?;
         self.store.record_index_stats(&stats).await?;
         log::info!(count = stats.len(); "Collected index statistics");
-        Ok(INDEX_STATS_INTERVAL)
+        Ok(interval_std)
     }
 
     /// Run one or more semicolon-separated statements via the simple query

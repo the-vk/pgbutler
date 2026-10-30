@@ -242,9 +242,10 @@ impl App {
 
     fn spawn_connect(&self, conn: Connection) {
         let tx = self.events_tx.clone();
+        let settings = Arc::clone(&self.config);
         tokio::spawn(async move {
             let result = async {
-                let db = DbConnection::connect(conn)
+                let db = DbConnection::connect(conn, settings)
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(Box::new(db))

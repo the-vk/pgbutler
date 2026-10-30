@@ -439,8 +439,16 @@ impl SettingsScreen {
             Node::App => Some(
                 Form::new(
                     "Application",
-                    &["AI provider"],
-                    vec![self.config.provider_name()],
+                    &[
+                        "AI provider",
+                        "Index stats interval (minutes)",
+                        "Index stats retry delay (minutes)",
+                    ],
+                    vec![
+                        self.config.provider_name(),
+                        (self.config.index_stats_interval().as_secs() / 60).to_string(),
+                        (self.config.index_stats_retry().as_secs() / 60).to_string(),
+                    ],
                 )
                 .choice(0, PROVIDERS.iter().map(ToString::to_string).collect()),
             ),
@@ -549,6 +557,16 @@ impl SettingsScreen {
                 }
             }
             Node::App => {
+                let minutes = |index: usize| {
+                    form.values[index].trim().parse::<u64>().map_err(|_| {
+                        format!(
+                            "invalid minutes '{}': must be a whole number",
+                            form.values[index]
+                        )
+                    })
+                };
+                let (interval, retry) = (minutes(1)?, minutes(2)?);
+                self.config.set_index_stats_schedule(interval, retry)?;
                 self.config.set_provider(&form.values[0])?;
                 self.provider_dirty = true;
             }
