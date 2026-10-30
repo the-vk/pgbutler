@@ -11,6 +11,7 @@ use tokio_postgres::Client;
 use crate::{agent, config};
 use crate::config::Connection;
 use crate::db::{self, QueryOutcome, RelKind};
+use crate::store::Store;
 use crate::ui::chat::{ChatAction, ChatScreen};
 use crate::ui::setup::SetupScreen;
 
@@ -33,7 +34,7 @@ pub enum AppError {
 pub enum AppEvent {
     ConnectResult {
         conn: Box<Connection>,
-        result: Result<Client, String>,
+        result: Result<(Client, Store), String>,
     },
     QueryResult(Result<QueryOutcome, String>),
     ExplainResult(Result<String, String>),
@@ -180,7 +181,7 @@ impl App {
                 Screen::Setup(setup) => {
                     setup.connecting = false;
                     match result {
-                        Ok(client) => {
+                        Ok((client, store)) => {
                             if let Err(error) = self.config.save_connection(&conn) {
                                 log::warn!("Failed to save connection profile: {error}");
                             }
@@ -191,6 +192,7 @@ impl App {
                             self.screen = Screen::Chat(ChatScreen::new(
                                 *conn,
                                 client,
+                                store,
                                 Arc::clone(&self.config),
                             ));
                             self.spawn_fetch_models();
@@ -203,7 +205,7 @@ impl App {
                         self.spawn_fetch_models();
                     }
                 }
-            }
+            },
             AppEvent::QueryResult(result) => {
                 if let Screen::Chat(chat) = &mut self.screen {
                     chat.on_query_result(result);
@@ -250,7 +252,12 @@ impl App {
     fn spawn_connect(&self, conn: Connection) {
         let tx = self.events_tx.clone();
         tokio::spawn(async move {
-            let result = db::connect(&conn).await.map_err(|e| e.to_string());
+            let result = async {
+                let client = db::connect(&conn).await.map_err(|e| e.to_string())?;
+                let store = Store::open(&conn).await.map_err(|e| e.to_string())?;
+                Ok((client, store))
+            }
+            .await;
             let _ = tx.send(AppEvent::ConnectResult {
                 conn: Box::new(conn),
                 result,
@@ -351,9 +358,7 @@ impl App {
     fn spawn_provider_models(&self, name: String, config: config::ProviderConfig) {
         let tx = self.events_tx.clone();
         tokio::spawn(async move {
-            let result = agent::list_models(&config)
-                .await
-                .map_err(|e| e.to_string());
+            let result = agent::list_models(&config).await.map_err(|e| e.to_string());
             let _ = tx.send(AppEvent::ProviderModelsResult(name, result));
         });
     }

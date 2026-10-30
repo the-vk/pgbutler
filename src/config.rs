@@ -826,6 +826,11 @@ pub fn connections_dir() -> PathBuf {
     app_dir().join("connections")
 }
 
+/// Per-connection SQLite data file: `~/.pgbutler/connections/<name>.sqlite`.
+pub fn connection_store_file(name: &str) -> PathBuf {
+    connections_dir().join(format!("{}.sqlite", sanitize_filename(name)))
+}
+
 pub fn config_file() -> PathBuf {
     app_dir().join("config.toml")
 }
@@ -907,7 +912,8 @@ struct LegacyConnection {
     password: String,
 }
 
-fn sanitize_filename(name: &str) -> String {
+/// Maps a connection name to a safe file stem shared by all per-connection files.
+pub(crate) fn sanitize_filename(name: &str) -> String {
     name.chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' {

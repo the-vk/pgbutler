@@ -15,6 +15,7 @@ use tokio_postgres::Client;
 use crate::agent::{AnalysisProgress, Response};
 use crate::config::{Config, Connection, ProviderConfig};
 use crate::db::{QueryOutcome, RelKind};
+use crate::store::Store;
 use crate::theme;
 use crate::ui::draw_banner;
 use crate::ui::settings::{SettingsEvent, SettingsScreen};
@@ -48,6 +49,7 @@ pub enum ChatAction {
 pub struct ChatScreen {
     pub conn: Connection,
     pub client: Arc<Client>,
+    pub store: Store,
     pub config: Arc<Config>,
     pub messages: Vec<Message>,
     pub input: String,
@@ -64,7 +66,7 @@ pub struct ChatScreen {
 }
 
 impl ChatScreen {
-    pub fn new(conn: Connection, client: Client, config: Arc<Config>) -> Self {
+    pub fn new(conn: Connection, client: Client, store: Store, config: Arc<Config>) -> Self {
         let mut messages = Vec::new();
         messages.push(Message {
             role: Role::System,
@@ -76,6 +78,7 @@ impl ChatScreen {
         Self {
             conn,
             client: Arc::new(client),
+            store,
             config,
             messages,
             input: String::new(),
@@ -424,19 +427,19 @@ impl ChatScreen {
         });
         let reply = match name.trim() {
             "" => {
-            let current = self.current_model().unwrap_or_else(|| "<none>".to_owned());
-            let width = crossterm::terminal::size()
-                .map_or(80, |(columns, _)| usize::from(columns))
-                .saturating_sub(8);
-            let mut content = format!("Current model: {current}");
-            if !self.models.is_empty() {
-                content.push('\n');
-                content.push_str(&format_columns(&self.models, width));
-            }
-            Message {
-                role: Role::System,
-                content,
-            }
+                let current = self.current_model().unwrap_or_else(|| "<none>".to_owned());
+                let width = crossterm::terminal::size()
+                    .map_or(80, |(columns, _)| usize::from(columns))
+                    .saturating_sub(8);
+                let mut content = format!("Current model: {current}");
+                if !self.models.is_empty() {
+                    content.push('\n');
+                    content.push_str(&format_columns(&self.models, width));
+                }
+                Message {
+                    role: Role::System,
+                    content,
+                }
             }
             name => {
                 if self.models.iter().any(|model| model == name) {
@@ -484,7 +487,10 @@ impl ChatScreen {
                     action = Some(ChatAction::RefreshModels);
                     Message {
                         role: Role::System,
-                        content: format!("API key set for provider '{}'.", self.config.provider_name()),
+                        content: format!(
+                            "API key set for provider '{}'.",
+                            self.config.provider_name()
+                        ),
                     }
                 }
                 Err(err) => Message {
@@ -547,13 +553,18 @@ impl ChatScreen {
         }
     }
 
-    pub fn on_connect_result(&mut self, conn: Connection, result: Result<Client, String>) -> bool {
+    pub fn on_connect_result(
+        &mut self,
+        conn: Connection,
+        result: Result<(Client, Store), String>,
+    ) -> bool {
         self.busy = false;
         match result {
-            Ok(client) => {
+            Ok((client, store)) => {
                 self.config.set_default_connection(&conn);
                 self.conn = conn;
                 self.client = Arc::new(client);
+                self.store = store;
                 self.messages.push(Message {
                     role: Role::System,
                     content: format!(
