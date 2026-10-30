@@ -552,7 +552,8 @@ impl Config {
         } else {
             server.logins.push(login);
         }
-        self.save_server(&server, None)
+        let name = server.name.clone();
+        self.save_server(&server, Some(&name))
     }
 
     pub fn delete_server(&self, name: &str) -> std::io::Result<()> {
