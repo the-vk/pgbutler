@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use color_eyre::eyre::Result;
+use eyre::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::{FutureExt, StreamExt};
 use ratatui::DefaultTerminal;

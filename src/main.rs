@@ -108,7 +108,7 @@ impl KeyboardEnhancementGuard {
 }
 
 #[tokio::main]
-async fn main() -> color_eyre::Result<()> {
+async fn main() -> eyre::Result<()> {
     let now = Local::now();
     let log_name = format!("{}", now.format("%Y-%m-%dT%H-%M-%S"));
     let log_file = FileBuilder::new(crate::config::log_dir(), log_name)
@@ -117,16 +117,17 @@ async fn main() -> color_eyre::Result<()> {
         .build()
         .unwrap();
 
-    logforth::starter_log::builder()
+    let logger = logforth::core::builder()
         .dispatch(|d| {
             d.filter(LevelFilter::MoreSevereEqual(Level::Debug))
                 .append(log_file)
         })
-        .apply();
+        .build();
+    log::set_boxed_logger(Box::new(logforth::bridge::log::LogBridge::new(logger)))
+        .expect("logger must be set before any other logging is initialized");
+    log::set_max_level(log::LevelFilter::Trace);
 
     log::info!("Starting pgbutler...");
-
-    color_eyre::install()?;
 
     let config = Arc::new(crate::config::Config::read()?);
 

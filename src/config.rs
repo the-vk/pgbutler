@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-use color_eyre::eyre::Result;
+use eyre::Result;
 use serde::{Deserialize, Serialize};
 
 mod keyring;
