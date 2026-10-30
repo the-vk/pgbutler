@@ -58,6 +58,18 @@ impl Store {
         Ok(Self { pool })
     }
 
+    /// Time of the most recent index statistics snapshot, if any.
+    pub async fn last_index_stats_at(&self) -> Result<Option<DateTime<Utc>>, StoreError> {
+        // Timestamps have a fixed width, so the text maximum is the latest one.
+        let latest: Option<String> =
+            sqlx::query_scalar("SELECT max(collected_at) FROM index_stats")
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(latest
+            .and_then(|ts| DateTime::parse_from_rfc3339(&ts).ok())
+            .map(|ts| ts.with_timezone(&Utc)))
+    }
+
     /// Appends one snapshot of index statistics, all rows stamped with the same time.
     pub async fn record_index_stats(&self, stats: &[IndexStat]) -> Result<(), StoreError> {
         let collected_at = format_ts(&Utc::now());
@@ -101,6 +113,7 @@ mod tests {
         let path = dir.join("nested").join("srv.sqlite");
 
         let store = Store::open(&path).await.unwrap();
+        assert_eq!(store.last_index_stats_at().await.unwrap(), None);
         let stat = IndexStat {
             relid: 25212,
             indexrelid: 25228,
@@ -132,6 +145,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!((rows, nulls, runs), (3, 1, 2));
+        let last = store.last_index_stats_at().await.unwrap().unwrap();
+        assert!(Utc::now() - last < chrono::Duration::minutes(1));
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

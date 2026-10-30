@@ -247,9 +247,6 @@ impl App {
                 let db = DbConnection::connect(conn)
                     .await
                     .map_err(|e| e.to_string())?;
-                if let Err(error) = db.collect_index_stats().await {
-                    log::warn!("Failed to collect index statistics: {error}");
-                }
                 Ok(Box::new(db))
             }
             .await;

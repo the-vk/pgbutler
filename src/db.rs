@@ -7,13 +7,20 @@
 //! certificate/key pair is always optional and, when configured, is
 //! presented for mutual TLS regardless of mode (as long as TLS is in use).
 
-use std::{collections::HashMap, str::FromStr};
+use std::{
+    collections::HashMap,
+    str::FromStr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
+use chrono::Utc;
 use openssl::ssl::{SslFiletype, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use strum::{AsRefStr, Display, EnumString};
+use tokio::task::JoinHandle;
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 
 use crate::config::{self, Connection};
@@ -21,6 +28,11 @@ use crate::config::{self, Connection};
 mod store;
 
 pub use store::{Store, StoreError};
+
+/// Minimum age of the latest index statistics sample before a new one is taken.
+const INDEX_STATS_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// Delay before retrying after a failed collection attempt.
+const INDEX_STATS_RETRY: Duration = Duration::from_secs(5 * 60);
 
 /// Tabular (or status) outcome of running a query via the simple query protocol.
 #[derive(Debug, Default, Clone)]
@@ -58,6 +70,16 @@ pub struct DbConnection {
     config: Connection,
     client: Client,
     store: Store,
+    /// Background index statistics sampler; aborted when the connection is dropped.
+    index_stats_task: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Drop for DbConnection {
+    fn drop(&mut self) {
+        if let Some(task) = self.index_stats_task.get_mut().ok().and_then(Option::take) {
+            task.abort();
+        }
+    }
 }
 
 impl DbConnection {
@@ -70,6 +92,7 @@ impl DbConnection {
             config,
             client,
             store,
+            index_stats_task: Mutex::new(None),
         })
     }
 
@@ -77,11 +100,51 @@ impl DbConnection {
         &self.config
     }
 
-    /// Reads current index usage statistics from the server and appends them
-    /// to the local store as a new snapshot.
-    pub async fn collect_index_stats(&self) -> Result<(), DbError> {
+    /// Starts a background task that samples index usage statistics into the
+    /// local store whenever the latest sample is older than
+    /// [`INDEX_STATS_INTERVAL`]. The task is stored in the connection and
+    /// aborted when the connection is dropped; calling this again replaces it.
+    pub fn spawn_index_stats_collector(self: &Arc<Self>) {
+        let db = Arc::downgrade(self);
+        let task = tokio::spawn(async move {
+            loop {
+                let Some(conn) = db.upgrade() else { break };
+                let wait = match conn.collect_index_stats_if_due().await {
+                    Ok(wait) => wait,
+                    Err(error) => {
+                        log::warn!("Failed to collect index statistics: {error}");
+                        INDEX_STATS_RETRY
+                    }
+                };
+                // Don't keep the connection alive while sleeping.
+                drop(conn);
+                tokio::time::sleep(wait).await;
+            }
+        });
+        let previous = self
+            .index_stats_task
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .replace(task);
+        if let Some(previous) = previous {
+            previous.abort();
+        }
+    }
+
+    /// Takes a new index statistics sample if the latest one is missing or too
+    /// old. Returns how long to wait until the next sample is due.
+    async fn collect_index_stats_if_due(&self) -> Result<Duration, DbError> {
+        let interval = chrono::Duration::from_std(INDEX_STATS_INTERVAL).expect("interval fits");
+        if let Some(last) = self.store.last_index_stats_at().await? {
+            let due_in = interval - (Utc::now() - last);
+            if due_in > chrono::Duration::zero() {
+                return Ok(due_in.to_std().unwrap_or(INDEX_STATS_RETRY));
+            }
+        }
         let stats = read_index_stats(&self.client).await?;
-        Ok(self.store.record_index_stats(&stats).await?)
+        self.store.record_index_stats(&stats).await?;
+        log::info!(count = stats.len(); "Collected index statistics");
+        Ok(INDEX_STATS_INTERVAL)
     }
 
     /// Run one or more semicolon-separated statements via the simple query

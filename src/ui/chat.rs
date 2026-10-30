@@ -72,8 +72,10 @@ impl ChatScreen {
                 conn.name, conn.login, conn.host, conn.port, conn.catalog
             ),
         });
+        let db = Arc::new(db);
+        db.spawn_index_stats_collector();
         Self {
-            db: Arc::new(db),
+            db,
             config,
             messages,
             input: String::new(),
@@ -557,6 +559,7 @@ impl ChatScreen {
             Ok(db) => {
                 self.config.set_default_connection(db.config());
                 self.db = Arc::new(*db);
+                self.db.spawn_index_stats_collector();
                 self.messages.push(Message {
                     role: Role::System,
                     content: format!(
