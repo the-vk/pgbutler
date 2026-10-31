@@ -25,6 +25,7 @@ use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 
 use crate::config::{self, Config, Connection};
 
+mod obsolete;
 mod store;
 
 pub use store::{IndexReportRow, Store, StoreError};
@@ -140,6 +141,55 @@ impl DbConnection {
             columns,
             rows,
             statuses: Vec::new(),
+        })
+    }
+
+    /// Indexes recommended for deletion by the point-based heuristic in
+    /// [`obsolete`], highest score first, with the reasons behind each score.
+    pub async fn obsolete_indexes_report(&self) -> Result<QueryOutcome, DbError> {
+        let indexes = self.store.index_stats_report().await?;
+        let candidates = obsolete::recommend(&indexes, &obsolete::default_criteria());
+        let mut columns: Vec<String> = ["schema", "table", "index", "score", "idx_tup_read"]
+            .map(str::to_owned)
+            .into();
+        columns.extend(
+            store::VELOCITY_WINDOWS
+                .iter()
+                .map(|(label, _)| format!("scans/h {label}")),
+        );
+        columns.push("reasons".to_owned());
+        let rows = candidates
+            .into_iter()
+            .map(|candidate| {
+                let index = candidate.index;
+                let mut cells = vec![
+                    index.schemaname,
+                    index.relname,
+                    index.indexrelname,
+                    candidate.assessment.score.to_string(),
+                    index.idx_tup_read.to_string(),
+                ];
+                cells.extend(index.scans_per_hour.iter().map(|velocity| {
+                    velocity.map_or_else(|| "-".to_owned(), |v| format!("{v:.2}"))
+                }));
+                let reasons: Vec<String> = candidate
+                    .assessment
+                    .findings
+                    .into_iter()
+                    .map(|finding| format!("{} (+{})", finding.reason, finding.points))
+                    .collect();
+                cells.push(reasons.join("; "));
+                cells
+            })
+            .collect();
+        let statuses = vec![format!(
+            "Indexes scoring at least {} points are listed.",
+            obsolete::RECOMMEND_THRESHOLD
+        )];
+        Ok(QueryOutcome {
+            columns,
+            rows,
+            statuses,
         })
     }
 
@@ -525,13 +575,28 @@ pub struct IndexStat {
     pub last_idx_scan: Option<chrono::DateTime<chrono::Utc>>,
     pub idx_tup_read: i64,
     pub idx_tup_fetch: i64,
+    pub is_primary: bool,
+    pub is_unique: bool,
+    /// The index leads with the columns of a foreign key constraint of its table.
+    pub supports_foreign_key: bool,
 }
+
+/// Index kind flags from `pg_index`/`pg_constraint`, joined to the statistics.
+const INDEX_STATS_QUERY: &str = "
+    SELECT s.*, i.indisprimary AS is_primary, i.indisunique AS is_unique,
+           EXISTS (
+               SELECT 1 FROM pg_constraint c
+               WHERE c.contype = 'f' AND c.conrelid = i.indrelid
+                 AND array_length(c.conkey, 1) <= i.indnkeyatts
+                 AND (i.indkey::int2[])[0:array_length(c.conkey, 1) - 1] <@ c.conkey
+                 AND c.conkey <@ (i.indkey::int2[])[0:array_length(c.conkey, 1) - 1]
+           ) AS supports_foreign_key
+    FROM pg_stat_all_indexes s
+    JOIN pg_index i ON i.indexrelid = s.indexrelid";
 
 /// Read the current usage statistics of all indexes.
 async fn read_index_stats(client: &Client) -> Result<Vec<IndexStat>, DbError> {
-    let rows = client
-        .query("SELECT * FROM pg_stat_all_indexes", &[])
-        .await?;
+    let rows = client.query(INDEX_STATS_QUERY, &[]).await?;
     rows.iter()
         .map(|row| {
             // `last_idx_scan` was added in PostgreSQL 16.
@@ -552,6 +617,9 @@ async fn read_index_stats(client: &Client) -> Result<Vec<IndexStat>, DbError> {
                 last_idx_scan,
                 idx_tup_read: row.try_get("idx_tup_read")?,
                 idx_tup_fetch: row.try_get("idx_tup_fetch")?,
+                is_primary: row.try_get("is_primary")?,
+                is_unique: row.try_get("is_unique")?,
+                supports_foreign_key: row.try_get("supports_foreign_key")?,
             })
         })
         .collect()
@@ -772,6 +840,71 @@ WHERE n.nspname = $1 AND c.relname = $2;
 "#;
 
 const GET_VIEW_DEF_QUERY: &str = "SELECT pg_get_viewdef($1) as view_def;";
+
+#[cfg(test)]
+mod live_tests {
+    //! Manual checks against a real server; run with
+    //! `PGPASSWORD=... cargo test live_ -- --ignored --nocapture`.
+    use super::*;
+
+    fn live_connection() -> Connection {
+        let mut conn = Connection::with_defaults("live");
+        conn.host = "127.0.0.1".into();
+        conn.login = "postgres".into();
+        conn.password = std::env::var("PGPASSWORD").unwrap();
+        conn.sslmode = config::SslMode::Disable;
+        conn
+    }
+
+    fn live_store_path() -> std::path::PathBuf {
+        std::env::temp_dir().join("pgbutler-live.sqlite")
+    }
+
+    /// Records one snapshot of the live server, dated `LIVE_AGE_HOURS` ago.
+    #[tokio::test]
+    #[ignore = "needs a PostgreSQL server"]
+    async fn live_collect_snapshot() {
+        let age: i64 = std::env::var("LIVE_AGE_HOURS").unwrap().parse().unwrap();
+        let client = connect_postgres(&live_connection()).await.unwrap();
+        let store = Store::open(&live_store_path()).await.unwrap();
+        let stats = read_index_stats(&client).await.unwrap();
+        let at = Utc::now() - chrono::Duration::hours(age);
+        store.record_index_stats_at(&stats, at).await.unwrap();
+        println!("recorded {} indexes, {age}h ago", stats.len());
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a snapshots collected by live_collect_snapshot"]
+    async fn live_report() {
+        let store = Store::open(&live_store_path()).await.unwrap();
+        let rows = store.index_stats_report().await.unwrap();
+        let criteria = obsolete::default_criteria();
+        for row in &rows {
+            let a = obsolete::assess(row, &criteria);
+            println!(
+                "{:<52} read={:<8} v={:?} score={} exempt={:?} {}",
+                row.indexrelname,
+                row.idx_tup_read,
+                row.scans_per_hour
+                    .map(|v| v.map(|v| (v * 100.0).round() / 100.0)),
+                a.score,
+                a.exempt,
+                if a.is_recommended() {
+                    "<== RECOMMENDED"
+                } else {
+                    ""
+                }
+            );
+        }
+        println!("--- recommended ---");
+        for c in obsolete::recommend(&rows, &criteria) {
+            println!(
+                "{} score={} {:?}",
+                c.index.indexrelname, c.assessment.score, c.assessment.findings
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

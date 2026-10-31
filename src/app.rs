@@ -148,6 +148,9 @@ impl App {
                                 ChatAction::Quit => self.should_quit = true,
                                 ChatAction::Connect(conn) => self.spawn_connect(conn),
                                 ChatAction::IndexStatsReport => self.spawn_index_stats_report(),
+                                ChatAction::ObsoleteIndexesReport => {
+                                    self.spawn_obsolete_indexes_report()
+                                }
                                 ChatAction::Explain(sql) => self.spawn_explain(sql),
                                 ChatAction::Analyze(sql) => self.spawn_analyze(sql),
                                 ChatAction::RelKind(schema, relation) => {
@@ -273,6 +276,20 @@ impl App {
             let db = Arc::clone(&chat.db);
             tokio::spawn(async move {
                 let result = db.index_stats_report().await.map_err(|e| e.to_string());
+                let _ = tx.send(AppEvent::QueryResult(result));
+            });
+        }
+    }
+
+    fn spawn_obsolete_indexes_report(&self) {
+        let tx = self.events_tx.clone();
+        if let Screen::Chat(chat) = &self.screen {
+            let db = Arc::clone(&chat.db);
+            tokio::spawn(async move {
+                let result = db
+                    .obsolete_indexes_report()
+                    .await
+                    .map_err(|e| e.to_string());
                 let _ = tx.send(AppEvent::QueryResult(result));
             });
         }
