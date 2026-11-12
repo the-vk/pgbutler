@@ -111,6 +111,8 @@ impl DbConnection {
             "idx_tup_read",
             "idx_tup_fetch",
             "last_idx_scan",
+            "tuples",
+            "size_bytes",
         ]
         .map(str::to_owned)
         .into();
@@ -130,6 +132,8 @@ impl DbConnection {
                     row.idx_tup_read.to_string(),
                     row.idx_tup_fetch.to_string(),
                     row.last_idx_scan.unwrap_or_else(|| "-".to_owned()),
+                    row.index_tuples.to_string(),
+                    row.index_size_bytes.to_string(),
                 ];
                 cells.extend(row.scans_per_hour.iter().map(|velocity| {
                     velocity.map_or_else(|| "-".to_owned(), |v| format!("{v:.2}"))
@@ -149,9 +153,17 @@ impl DbConnection {
     pub async fn obsolete_indexes_report(&self) -> Result<QueryOutcome, DbError> {
         let indexes = self.store.index_stats_report().await?;
         let candidates = obsolete::recommend(&indexes, &obsolete::default_criteria());
-        let mut columns: Vec<String> = ["schema", "table", "index", "score", "idx_tup_read"]
-            .map(str::to_owned)
-            .into();
+        let mut columns: Vec<String> = [
+            "schema",
+            "table",
+            "index",
+            "score",
+            "idx_tup_read",
+            "tuples",
+            "size_bytes",
+        ]
+        .map(str::to_owned)
+        .into();
         columns.extend(
             store::VELOCITY_WINDOWS
                 .iter()
@@ -168,6 +180,8 @@ impl DbConnection {
                     index.indexrelname,
                     candidate.assessment.score.to_string(),
                     index.idx_tup_read.to_string(),
+                    index.index_tuples.to_string(),
+                    index.index_size_bytes.to_string(),
                 ];
                 cells.extend(index.scans_per_hour.iter().map(|velocity| {
                     velocity.map_or_else(|| "-".to_owned(), |v| format!("{v:.2}"))
@@ -579,6 +593,10 @@ pub struct IndexStat {
     pub is_unique: bool,
     /// The index leads with the columns of a foreign key constraint of its table.
     pub supports_foreign_key: bool,
+    /// Estimated number of index entries (`pg_class.reltuples`; 0 if never analyzed).
+    pub index_tuples: i64,
+    /// On-disk size of the index in bytes.
+    pub index_size_bytes: i64,
 }
 
 /// Index kind flags from `pg_index`/`pg_constraint`, joined to the statistics.
@@ -590,9 +608,12 @@ const INDEX_STATS_QUERY: &str = "
                  AND array_length(c.conkey, 1) <= i.indnkeyatts
                  AND (i.indkey::int2[])[0:array_length(c.conkey, 1) - 1] <@ c.conkey
                  AND c.conkey <@ (i.indkey::int2[])[0:array_length(c.conkey, 1) - 1]
-           ) AS supports_foreign_key
+           ) AS supports_foreign_key,
+           GREATEST(c.reltuples, 0)::bigint AS index_tuples,
+           pg_relation_size(s.indexrelid) AS index_size_bytes
     FROM pg_stat_all_indexes s
-    JOIN pg_index i ON i.indexrelid = s.indexrelid";
+    JOIN pg_index i ON i.indexrelid = s.indexrelid
+    JOIN pg_class c ON c.oid = s.indexrelid";
 
 /// Read the current usage statistics of all indexes.
 async fn read_index_stats(client: &Client) -> Result<Vec<IndexStat>, DbError> {
@@ -620,6 +641,8 @@ async fn read_index_stats(client: &Client) -> Result<Vec<IndexStat>, DbError> {
                 is_primary: row.try_get("is_primary")?,
                 is_unique: row.try_get("is_unique")?,
                 supports_foreign_key: row.try_get("supports_foreign_key")?,
+                index_tuples: row.try_get("index_tuples")?,
+                index_size_bytes: row.try_get("index_size_bytes")?,
             })
         })
         .collect()

@@ -8,7 +8,11 @@
 use super::IndexReportRow;
 
 /// Minimum total score for an index to be recommended for deletion.
-pub const RECOMMEND_THRESHOLD: u32 = 5;
+///
+/// Weights are ordered by importance: index size by tuple count (up to 5
+/// points) outweighs size in bytes (up to 4), which outweighs the usage
+/// metrics (up to 3 each).
+pub const RECOMMEND_THRESHOLD: u32 = 10;
 
 /// Points awarded by a single criterion and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +52,8 @@ pub struct Candidate {
 /// Rules used by default.
 pub fn default_criteria() -> Vec<Box<dyn Criterion>> {
     vec![
+        Box::new(IndexTupleCount),
+        Box::new(IndexSize),
         Box::new(HighReads),
         Box::new(DecliningVelocity),
         Box::new(RecentlyIdle),
@@ -102,6 +108,61 @@ pub fn recommend(indexes: &[IndexReportRow], criteria: &[Box<dyn Criterion>]) ->
         .collect();
     candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.assessment.score));
     candidates
+}
+
+/// Size-based rules only add weight to an index that is not being scanned
+/// right now: a big index in active use is worth its space.
+fn recently_scanned(index: &IndexReportRow) -> bool {
+    index.scans_per_hour[0].is_some_and(|velocity| velocity > 0.0)
+}
+
+/// Estimated number of index entries: the more entries, the more maintenance
+/// cost (writes, vacuum) a useless index causes. Up to 5 points, the largest
+/// weight of the heuristic.
+pub struct IndexTupleCount;
+
+impl Criterion for IndexTupleCount {
+    fn evaluate(&self, index: &IndexReportRow) -> Option<Finding> {
+        if recently_scanned(index) {
+            return None;
+        }
+        let points = match index.index_tuples {
+            n if n >= 10_000_000 => 5,
+            n if n >= 1_000_000 => 4,
+            n if n >= 100_000 => 3,
+            n if n >= 10_000 => 2,
+            n if n >= 1_000 => 1,
+            _ => return None,
+        };
+        Some(Finding {
+            points,
+            reason: format!("~{} entries in the index", index.index_tuples),
+        })
+    }
+}
+
+/// On-disk size of the index: the space and cache a useless index wastes.
+/// Up to 4 points, the second largest weight.
+pub struct IndexSize;
+
+impl Criterion for IndexSize {
+    fn evaluate(&self, index: &IndexReportRow) -> Option<Finding> {
+        if recently_scanned(index) {
+            return None;
+        }
+        const MIB: i64 = 1024 * 1024;
+        let points = match index.index_size_bytes {
+            n if n >= 1024 * MIB => 4,
+            n if n >= 256 * MIB => 3,
+            n if n >= 64 * MIB => 2,
+            n if n >= 8 * MIB => 1,
+            _ => return None,
+        };
+        Some(Finding {
+            points,
+            reason: format!("{} MiB on disk", index.index_size_bytes / MIB),
+        })
+    }
 }
 
 /// Lifetime volume of tuples read: the more an index was relied upon in the
@@ -185,8 +246,19 @@ mod tests {
             is_primary: false,
             is_unique: false,
             supports_foreign_key: false,
+            index_tuples: 0,
+            index_size_bytes: 0,
             scans_per_hour: velocity,
         }
+    }
+
+    const MIB: i64 = 1024 * 1024;
+
+    /// Adds the maximum size-based points: 10M entries (5) + 1 GiB (4).
+    fn large(mut idx: IndexReportRow) -> IndexReportRow {
+        idx.index_tuples = 10_000_000;
+        idx.index_size_bytes = 1024 * MIB;
+        idx
     }
 
     fn points(criterion: &dyn Criterion, index: &IndexReportRow) -> u32 {
@@ -206,6 +278,72 @@ mod tests {
         assert_eq!(at(999_999), 2);
         assert_eq!(at(1_000_000), 3);
         assert_eq!(at(i64::MAX), 3);
+    }
+
+    #[test]
+    fn tuple_count_tiers() {
+        let at = |tuples| {
+            let mut idx = index(0, [Some(0.0); 4]);
+            idx.index_tuples = tuples;
+            points(&IndexTupleCount, &idx)
+        };
+        assert_eq!(at(0), 0);
+        assert_eq!(at(999), 0);
+        assert_eq!(at(1_000), 1);
+        assert_eq!(at(10_000), 2);
+        assert_eq!(at(100_000), 3);
+        assert_eq!(at(1_000_000), 4);
+        assert_eq!(at(9_999_999), 4);
+        assert_eq!(at(10_000_000), 5);
+        assert_eq!(at(i64::MAX), 5);
+    }
+
+    #[test]
+    fn size_tiers() {
+        let at = |bytes| {
+            let mut idx = index(0, [Some(0.0); 4]);
+            idx.index_size_bytes = bytes;
+            points(&IndexSize, &idx)
+        };
+        assert_eq!(at(0), 0);
+        assert_eq!(at(8 * MIB - 1), 0);
+        assert_eq!(at(8 * MIB), 1);
+        assert_eq!(at(64 * MIB), 2);
+        assert_eq!(at(256 * MIB), 3);
+        assert_eq!(at(1024 * MIB - 1), 3);
+        assert_eq!(at(1024 * MIB), 4);
+        assert_eq!(at(i64::MAX), 4);
+    }
+
+    #[test]
+    fn size_rules_skip_indexes_scanned_in_the_last_hour() {
+        let mut idx = large(index(0, [Some(0.5), Some(0.0), Some(0.0), Some(0.0)]));
+        assert_eq!(points(&IndexTupleCount, &idx), 0);
+        assert_eq!(points(&IndexSize, &idx), 0);
+        idx.scans_per_hour[0] = Some(0.0);
+        assert_eq!(points(&IndexTupleCount, &idx), 5);
+        assert_eq!(points(&IndexSize, &idx), 4);
+        // Unknown recent activity does not exempt the index.
+        idx.scans_per_hour[0] = None;
+        assert_eq!(points(&IndexSize, &idx), 4);
+    }
+
+    #[test]
+    fn weights_are_ordered_tuple_count_then_size_then_usage_metrics() {
+        let idx = large(index(
+            5_000_000,
+            [Some(0.0), Some(5.0), Some(10.0), Some(100.0)],
+        ));
+        let tuples = points(&IndexTupleCount, &idx);
+        let size = points(&IndexSize, &idx);
+        let usage = [
+            points(&HighReads, &idx),
+            points(&DecliningVelocity, &idx),
+            points(&RecentlyIdle, &idx),
+        ];
+        assert!(tuples > size);
+        assert!(usage.iter().all(|points| size > *points));
+        assert_eq!(usage, [3, 3, 1]);
     }
 
     #[test]
@@ -258,23 +396,50 @@ mod tests {
 
     #[test]
     fn heavily_read_but_abandoned_index_is_recommended() {
-        // reads 3 + declining 3 + idle 1 = 7
+        // tuples 5 + size 4 + reads 3 + declining 3 + idle 1 = 16
+        let idx = large(index(
+            5_000_000,
+            [Some(0.0), Some(2.0), Some(20.0), Some(100.0)],
+        ));
+        let assessment = assess(&idx, &default_criteria());
+        assert_eq!(assessment.score, 16);
+        assert!(assessment.is_recommended());
+    }
+
+    #[test]
+    fn small_abandoned_index_is_not_worth_recommending() {
+        // reads 3 + declining 3 + idle 1 = 7, no size points
         let idx = index(5_000_000, [Some(0.0), Some(2.0), Some(20.0), Some(100.0)]);
         let assessment = assess(&idx, &default_criteria());
         assert_eq!(assessment.score, 7);
+        assert!(!assessment.is_recommended());
+    }
+
+    #[test]
+    fn large_but_never_read_and_never_scanned_index_is_recommended() {
+        // tuples 5 + size 4 + idle 3 = 12
+        let idx = large(index(0, [Some(0.0); 4]));
+        let assessment = assess(&idx, &default_criteria());
+        assert_eq!(assessment.score, 12);
         assert!(assessment.is_recommended());
     }
 
     #[test]
     fn fully_idle_index_with_big_history_is_recommended() {
-        // reads 3 + declining 0 + idle 3 = 6
-        let idx = index(1_000_000, [Some(0.0); 4]);
-        assert_eq!(assess(&idx, &default_criteria()).score, 6);
+        // tuples 5 + size 4 + reads 3 + declining 0 + idle 3 = 15
+        let idx = large(index(1_000_000, [Some(0.0); 4]));
+        let assessment = assess(&idx, &default_criteria());
+        assert_eq!(assessment.score, 15);
+        assert!(assessment.is_recommended());
     }
 
     #[test]
     fn steadily_used_index_is_not_recommended() {
-        let idx = index(50_000_000, [Some(40.0), Some(40.0), Some(40.0), Some(40.0)]);
+        // big, but in use: only the lifetime reads score
+        let idx = large(index(
+            50_000_000,
+            [Some(40.0), Some(40.0), Some(40.0), Some(40.0)],
+        ));
         let assessment = assess(&idx, &default_criteria());
         assert_eq!(assessment.score, 3);
         assert!(!assessment.is_recommended());
@@ -299,13 +464,15 @@ mod tests {
 
     #[test]
     fn threshold_boundary() {
-        // reads 2 + declining 3 = 5 -> recommended
-        let at_threshold = index(100_000, [Some(1.0), Some(2.0), Some(3.0), Some(4.0)]);
+        // tuples 5 + reads 2 + idle 3 = 10 == threshold -> recommended
+        let mut at_threshold = index(100_000, [Some(0.0); 4]);
+        at_threshold.index_tuples = 10_000_000;
         let assessment = assess(&at_threshold, &default_criteria());
         assert_eq!(assessment.score, RECOMMEND_THRESHOLD);
         assert!(assessment.is_recommended());
-        // reads 1 + declining 3 = 4 -> not recommended
-        let below = index(10_000, [Some(1.0), Some(2.0), Some(3.0), Some(4.0)]);
+        // reads 1 instead of 2 -> 9, not recommended
+        let mut below = index(10_000, [Some(0.0); 4]);
+        below.index_tuples = 10_000_000;
         let assessment = assess(&below, &default_criteria());
         assert_eq!(assessment.score, RECOMMEND_THRESHOLD - 1);
         assert!(!assessment.is_recommended());
@@ -313,9 +480,12 @@ mod tests {
 
     #[test]
     fn recommend_filters_and_sorts_by_score() {
-        let mut medium = index(100_000, [Some(1.0), Some(2.0), Some(3.0), Some(4.0)]);
+        let mut medium = large(index(100_000, [Some(0.0), Some(2.0), Some(3.0), Some(4.0)]));
         medium.indexrelname = "medium".into();
-        let mut worst = index(5_000_000, [Some(0.0), Some(2.0), Some(20.0), Some(100.0)]);
+        let mut worst = large(index(
+            5_000_000,
+            [Some(0.0), Some(2.0), Some(20.0), Some(100.0)],
+        ));
         worst.indexrelname = "worst".into();
         let mut healthy = index(5_000_000, [Some(9.0); 4]);
         healthy.indexrelname = "healthy".into();
@@ -331,7 +501,7 @@ mod tests {
 
     #[test]
     fn recommend_keeps_input_order_for_equal_scores() {
-        let mut first = index(1_000_000, [Some(0.0); 4]);
+        let mut first = large(index(1_000_000, [Some(0.0); 4]));
         first.indexrelname = "first".into();
         let mut second = first.clone();
         second.indexrelname = "second".into();
@@ -344,7 +514,10 @@ mod tests {
     }
 
     fn abandoned() -> IndexReportRow {
-        index(5_000_000, [Some(0.0), Some(2.0), Some(20.0), Some(100.0)])
+        large(index(
+            5_000_000,
+            [Some(0.0), Some(2.0), Some(20.0), Some(100.0)],
+        ))
     }
 
     #[test]

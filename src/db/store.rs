@@ -87,8 +87,9 @@ impl Store {
                 "INSERT INTO index_stats (
                      collected_at, relid, indexrelid, schemaname, relname, indexrelname,
                      idx_scan, last_idx_scan, idx_tup_read, idx_tup_fetch,
-                     is_primary, is_unique, supports_foreign_key
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                     is_primary, is_unique, supports_foreign_key,
+                     index_tuples, index_size_bytes
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             )
             .bind(&collected_at)
             .bind(i64::from(s.relid))
@@ -103,6 +104,8 @@ impl Store {
             .bind(s.is_primary)
             .bind(s.is_unique)
             .bind(s.supports_foreign_key)
+            .bind(s.index_tuples)
+            .bind(s.index_size_bytes)
             .execute(&mut *tx)
             .await?;
         }
@@ -127,6 +130,8 @@ pub struct IndexReportRow {
     pub is_primary: bool,
     pub is_unique: bool,
     pub supports_foreign_key: bool,
+    pub index_tuples: i64,
+    pub index_size_bytes: i64,
     /// Average `idx_scan` increase per hour for each of [`VELOCITY_WINDOWS`];
     /// `None` when the history does not reach back far enough or the counter was reset.
     pub scans_per_hour: [Option<f64>; 4],
@@ -144,6 +149,8 @@ type LatestRow = (
     bool,
     bool,
     bool,
+    i64,
+    i64,
 );
 
 impl Store {
@@ -156,7 +163,8 @@ impl Store {
         let latest: Vec<LatestRow> = sqlx::query_as(
             "SELECT indexrelid, schemaname, relname, indexrelname,
                     idx_scan, idx_tup_read, idx_tup_fetch, last_idx_scan,
-                    is_primary, is_unique, supports_foreign_key
+                    is_primary, is_unique, supports_foreign_key,
+                    index_tuples, index_size_bytes
              FROM index_stats WHERE collected_at = ?1",
         )
         .bind(format_ts(&latest_at))
@@ -178,6 +186,8 @@ impl Store {
                     is_primary,
                     is_unique,
                     supports_foreign_key,
+                    index_tuples,
+                    index_size_bytes,
                 )| {
                     let row = IndexReportRow {
                         schemaname,
@@ -190,6 +200,8 @@ impl Store {
                         is_primary,
                         is_unique,
                         supports_foreign_key,
+                        index_tuples,
+                        index_size_bytes,
                         scans_per_hour: [None; 4],
                     };
                     (id, row)
@@ -270,6 +282,8 @@ mod tests {
             is_primary: true,
             is_unique: true,
             supports_foreign_key: false,
+            index_tuples: 1000,
+            index_size_bytes: 8192,
         };
         let never_used = IndexStat {
             indexrelid: 25248,
@@ -361,8 +375,9 @@ mod tests {
             sqlx::query(
                 "INSERT INTO index_stats (collected_at, relid, indexrelid, schemaname, relname,
                      indexrelname, idx_scan, idx_tup_read, idx_tup_fetch,
-                     is_primary, is_unique, supports_foreign_key)
-                 VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                     is_primary, is_unique, supports_foreign_key,
+                     index_tuples, index_size_bytes)
+                 VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             )
             .bind(format_ts(&(now - chrono::Duration::hours(age))))
             .bind(id)
@@ -375,6 +390,8 @@ mod tests {
             .bind(f[7] == "1")
             .bind(f[8] == "1")
             .bind(f[9] == "1")
+            .bind(f[10].parse::<i64>().unwrap())
+            .bind(f[11].parse::<i64>().unwrap())
             .execute(&store.pool)
             .await
             .unwrap();
@@ -419,7 +436,22 @@ mod tests {
         let report = simulated_store().await.index_stats_report().await.unwrap();
         let criteria = default_criteria();
         // The abandoned-looking indexes are all primary keys, so nothing is recommended.
-        assert!(recommend(&report, &criteria).is_empty());
+        let recommended = recommend(&report, &criteria);
+        let scored: Vec<_> = recommended
+            .iter()
+            .map(|c| (c.index.indexrelname.as_str(), c.assessment.score))
+            .collect();
+        // The only non-exempt indexes that are big and never scanned: both
+        // 10M-entry indexes, one 300 MiB and one 67 MiB.
+        assert_eq!(
+            scored,
+            [
+                ("payment_transaction_amount_cents_order_id_idx", 11),
+                ("sales_order_status_created_idx", 10),
+            ]
+        );
+        let top = &recommended[0].assessment.findings;
+        assert_eq!(top.iter().map(|f| f.points).collect::<Vec<_>>(), [5, 3, 3]);
 
         for (name, reason) in [
             ("product_review_pkey", "primary key"),
@@ -431,22 +463,19 @@ mod tests {
             assert_eq!(assessment.score, 0);
         }
 
-        // Without the exemption the pkeys would score 6 and be recommended.
-        let mut stripped = find(&report, "product_review_pkey").clone();
+        // Without the exemption the big, idle primary key of journal_line would qualify:
+        // 20M entries (5) + 428 MiB (3) + idle (3).
+        let mut stripped = find(&report, "journal_line_pkey").clone();
         stripped.is_primary = false;
         stripped.is_unique = false;
         let assessment = assess(&stripped, &criteria);
-        assert_eq!(assessment.score, 6);
+        assert_eq!(assessment.score, 11);
         assert!(assessment.is_recommended());
 
-        // Actively used indexes with falling velocity stay below the threshold.
+        // Still used, with falling velocity: size points are withheld only when
+        // the last hour had scans; here it was idle, so the index scores 8 and stays below.
         let hot = assess(find(&report, "customer_email_idx"), &criteria);
-        assert_eq!(hot.score, 3); // 2 velocity drops + 1 idle window, few reads
+        assert_eq!(hot.score, 8);
         assert!(!hot.is_recommended());
-
-        // Never used, never read: idle but no evidence they were ever valuable.
-        let unused = assess(find(&report, "sales_order_status_created_idx"), &criteria);
-        assert_eq!(unused.score, 3);
-        assert!(!unused.is_recommended());
     }
 }
